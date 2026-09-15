@@ -76,9 +76,22 @@ current_location() {
   scselect 2>/dev/null | sed -n 's/^ \* .*(\(.*\))$/\1/p'
 }
 
-# Normalize a MAC for comparison. macOS ships bash 3.2, which has no
-# ${var,,} lowercase expansion, so use tr.
-norm_mac() { printf '%s' "$1" | tr 'A-Z' 'a-z'; }
+# Normalize a MAC so that equivalent spellings compare equal. Two things can
+# differ between a hand-written config and `arp -n` output: the case, and
+# leading zeros, which arp omits ("0:0:5e:0:53:1" vs "00:00:5e:00:53:01").
+# macOS ships bash 3.2, which has no ${var,,} lowercase expansion, so use tr.
+# One pass over the six octets; no external command beyond tr.
+norm_mac() {
+  local mac out="" oct sep=""
+  mac="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"
+  local IFS=:
+  for oct in $mac; do
+    [[ ${#oct} -eq 1 ]] && oct="0$oct"
+    out="$out$sep$oct"
+    sep=":"
+  done
+  printf '%s' "$out"
+}
 
 # Send one packet to <ip> so the kernel performs an ARP lookup and fills the
 # neighbour table. A closed UDP socket is enough: what matters is that the
@@ -212,7 +225,7 @@ log "loaded ${#LOC_NAMES[@]} location rule(s) from $CONFIG"
 
 matched_location=""
 matched_desc=""
-identity_mismatch=""
+identity_mismatch=0
 
 idx=0
 while [[ $idx -lt ${#LOC_NAMES[@]} ]]; do
@@ -228,10 +241,10 @@ while [[ $idx -lt ${#LOC_NAMES[@]} ]]; do
     matched_desc="$ip $mac_seen"
     break
   elif [[ -n "$mac_seen" ]]; then
+    # The address and both MACs stay in this local log line only: nothing
+    # identifying goes into a notification (see AGENTS.md, section 8).
     log "  device at $ip has MAC $mac_seen, expected $mac (identity mismatch)"
-    # Only the address is kept for the notification: the observed MAC stays in
-    # the local log above (see the privacy note in AGENTS.md, section 8).
-    identity_mismatch="$ip"
+    identity_mismatch=1
   else
     log "  no answer from $ip"
   fi
@@ -262,8 +275,8 @@ if [[ "$current" == "$DEFAULT_LOCATION" ]]; then
   exit 0
 fi
 
-if [[ -n "$identity_mismatch" ]]; then
-  notify "A device answered at $identity_mismatch, but its MAC is not the one configured. Check the network settings."
+if [[ "$identity_mismatch" == 1 ]]; then
+  notify "A configured address answered with an unexpected MAC. Check the network settings."
 else
   notify "Cannot identify the current network; the network settings may not match this environment."
 fi

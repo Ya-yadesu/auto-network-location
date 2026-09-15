@@ -26,8 +26,10 @@ README.md            面向用户的设计与用法说明（英文）
 5. **自动化只做「进入」方向。** 从 `Automatic` 切到识别出的位置是自动的；从非默认位置退出**只通知、不自动切**。理由是二层层面「设备消失」可能意味着真实配置变动，不该由脚本猜。
 6. **幂等。** 已在目标位置就什么都不做。切换动作本身会改写 `SystemConfiguration`，会再次触发自己，必须靠幂等收敛。
 7. **纯 bash 3.2。** macOS 自带 bash 是 3.2，**没有** `${var,,}`、`mapfile`、关联数组等 bash 4+ 特性。已因此写错过一次判断方向（见第 5 节）。
-8. **零依赖。** 只用 macOS 自带命令。
-9. 面向用户的字符串、注释、README 用**英文**；本文件与代理工作笔记用**中文**。
+8. **配置是 env 文件、按编号成组。** `~/.wifi-loc-control/locations.env`，形如 `LOCATION_n_NAME/_IP/_MAC`。位置名是**变量值**而不是变量名，所以允许空格与非 ASCII。不要改回「变量名 = 位置名」的写法——那会把位置名限制成合法标识符。
+9. **配置文件是被 `source` 的代码，不是被解析的数据。** 读取后立即 `unset` 掉 `LOCATION_*`，避免泄漏给子进程。新增配置项时保持这个模式，并在文档里提醒用户该文件的权限（600）与来源可信。
+10. **零依赖。** 只用 macOS 自带命令。
+11. 面向用户的字符串、注释、README 用**英文**；本文件与代理工作笔记用**中文**。
 
 ## 3. 为什么不能用 SSID（实测，macOS 27.0 / 26A428）
 
@@ -48,6 +50,7 @@ README.md            面向用户的设计与用法说明（英文）
 ## 5. 环境与工具陷阱（都已实际踩过）
 
 - **bash 3.2**：`${mac,,}` 报 `bad substitution`，且**不终止脚本**（在子 shell 中失败），会把「匹配成功」判断成「身份不符」。所有大小写归一化用 `tr`。
+- **bash 3.2 + `set -u` 时空数组的 `${arr[*]}` 会报 unbound variable**（bash 4 才修），例如「数组是否已含某元素」的检查。必须先判 `${#arr[@]} -gt 0` 再展开。
 - **`for arg in "$@"` 内 `shift` 无效**：迭代列表在进入循环前已固定。解析带取值的选项要用带下标的 `while` + `${!i}`。
 - **`scselect` 切换后有 3~5 秒窗口**，期间 DNS 可能解析失败（`curl: (6) Could not resolve host`），随后自愈。判断「网络坏了」前必须等接口稳定再复测——本项目已因此误判两次。
 - **`networksetup -createlocation <名>` 建的是空位置**（无服务、无接口）；`-createlocation <名> populate` 建的是**全新默认服务**（DHCP、无 DNS），**不复制**原位置的 TCP/IP 与 DNS，还会把原位置的服务清掉。要建位置就用 `-createnetworkservice <服务名> <硬件端口>` 显式创建后再 `-setmanual` / `-setdnsservers`。
@@ -64,15 +67,19 @@ bash -n wifi-loc-detect.sh
 
 # 干跑（默认），用临时配置，不碰 ~/.wifi-loc-control、不改变系统状态
 MAC=$(arp -n 192.0.2.1 | sed -n 's/.* at \([0-9a-fA-F:]*\) on .*/\1/p')
-printf '192.0.2.1  %s = Home\n' "$MAC" > /tmp/t.conf
-WLC_CONFIG=/tmp/t.conf ./wifi-loc-detect.sh
+cat > /tmp/t.env <<EOF
+LOCATION_1_NAME="Home"
+LOCATION_1_IP="192.0.2.1"
+LOCATION_1_MAC="$MAC"
+EOF
+WLC_CONFIG=/tmp/t.env ./wifi-loc-detect.sh
 
 # 反例：故意写错 MAC，必须走「身份不符」而不是「命中」
-printf '192.0.2.1  de:ad:be:ef:00:01 = Home\n' > /tmp/t-bad.conf
-WLC_CONFIG=/tmp/t-bad.conf ./wifi-loc-detect.sh
+sed 's/LOCATION_1_MAC=.*/LOCATION_1_MAC="de:ad:be:ef:00:01"/' /tmp/t.env > /tmp/t-bad.env
+WLC_CONFIG=/tmp/t-bad.env ./wifi-loc-detect.sh
 ```
 
-已覆盖的用例（2026-09-16 全部通过）：MAC 匹配且已在目标位置、MAC 身份不符、多条目先命中、命中但位置不同（干跑提示不执行）、`--print-mac`、配置缺失（退出码 3）、参数缺失（退出码 2）。
+已覆盖的用例（2026-09-16 全部通过）：MAC 匹配且已在目标位置、MAC 身份不符、多条目先命中、命中但位置不同（干跑提示不执行）、非法 IP / 不完整组被跳过、位置名含空格与非 ASCII、`--print-mac`、`--help`、配置缺失（退出码 3）、参数缺失（退出码 2）。
 
 **尚未验证**：`--apply` 的真实切换、以及「离家后特征设备从邻居表消失」这一半。后者必须用真实移动验证，不能靠推理。
 

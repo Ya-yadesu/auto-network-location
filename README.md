@@ -91,14 +91,26 @@ then set the values.
 mkdir -p ~/.wifi-loc-control
 ```
 
-`~/.wifi-loc-control/locations.conf`, one characteristic device per line:
+`~/.wifi-loc-control/locations.env` — **one numbered group per network**:
 
+```sh
+# the macOS location to switch to, the device address, and the device MAC
+LOCATION_1_NAME="Home"
+LOCATION_1_IP="192.0.2.1"
+LOCATION_1_MAC="00:00:5e:00:53:01"
+
+# LOCATION_2_NAME="Office"
+# LOCATION_2_IP="198.51.100.1"
+# LOCATION_2_MAC="aa:bb:cc:dd:ee:ff"
 ```
-# <device address>  <device MAC>  = <location name>
-192.0.2.1  00:00:5e:00:53:01 = Home
-# unmatched networks fall back to this location
-DEFAULT = Automatic
-```
+
+Add a network by copying a group and incrementing the number. The location name
+is a *value* rather than a variable name, so it may contain spaces and non-ASCII
+characters (`LOCATION_1_NAME="My Home"` is fine).
+
+The file is **sourced**, so it is code, not data: keep it owned by you with mode
+600, and do not copy one in from an untrusted source. The script unsets the
+`LOCATION_*` variables immediately after reading them.
 
 Find the MAC from the network itself, while connected to it:
 
@@ -106,9 +118,12 @@ Find the MAC from the network itself, while connected to it:
 ./wifi-loc-detect.sh --print-mac 192.0.2.1
 ```
 
-Each location needs its own line collected on its own network. `Home` uses a
-device that is reachable from both the `Automatic` and the `Home` state — the
-upstream router satisfies that.
+Each location needs its own group collected on its own network. A location's
+device must be present from both the `Automatic` and that location's state — an
+upstream router satisfies that for a home network.
+
+When no group matches, the script switches to the default location, which is
+`Automatic` (override with the `WLC_DEFAULT` environment variable).
 
 ### 3. Try it
 

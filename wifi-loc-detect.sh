@@ -4,10 +4,10 @@
 # belongs to, based on whether a characteristic device is present.
 #
 # Design (settled 2026-09-15):
-#   * Each known network is identified by ONE characteristic device: its IP and
-#     its MAC. The device must be present in every location state on that
-#     network (e.g. the upstream router, which stays reachable whether the Mac
-#     is in "Automatic" or in "Home").
+#   * Each known network is identified by ONE characteristic device: its
+#     address and its MAC. The device must be present while the Mac is on that
+#     network, whether or not it is the Mac's current gateway (an upstream
+#     router is a good choice).
 #   * The probe is done at layer 2, without ICMP and without raw sockets:
 #     a packet is sent to the address to make the kernel resolve it, then the
 #     MAC is read from the neighbour table (`arp -n`). This works even when
@@ -21,6 +21,17 @@
 #   * Switching locations is hot: scselect applies the new configuration
 #     immediately, without changing the Wi-Fi network.
 #
+# Config: ~/.wifi-loc-control/locations.env (override with WLC_CONFIG).
+# It is sourced, one numbered group per network:
+#
+#     LOCATION_1_NAME="Home"
+#     LOCATION_1_IP="192.0.2.1"
+#     LOCATION_1_MAC="00:00:5e:00:53:01"
+#
+# The location name is a value, not a variable name, so it may contain spaces
+# and non-ASCII characters. Because the file is sourced, it is code: keep it
+# owned by you, mode 600, and do not copy one in from an untrusted source.
+#
 # Usage:
 #   ./wifi-loc-detect.sh                    # dry run: print the decision only
 #   ./wifi-loc-detect.sh --apply            # actually run scselect
@@ -31,13 +42,15 @@
 #
 set -uo pipefail
 
-CONFIG="${WLC_CONFIG:-$HOME/.wifi-loc-control/locations.conf}"
-DEFAULT_LOCATION="Automatic"
+CONFIG="${WLC_CONFIG:-$HOME/.wifi-loc-control/locations.env}"
+DEFAULT_LOCATION="${WLC_DEFAULT:-Automatic}"
 ATTEMPTS=4          # probe attempts before giving up
 RETRY_DELAY=1       # seconds between attempts (settling time after a change)
 PROBE_PORT=33445    # UDP port used only to force an ARP lookup
 APPLY=0
 NOTIFY=0
+
+HELP_LAST_LINE=39   # last line of the comment block shown by --help
 
 i=1
 while [[ $i -le $# ]]; do
@@ -50,7 +63,7 @@ while [[ $i -le $# ]]; do
       [[ $i -gt $# ]] && { echo "--print-mac needs an IP" >&2; exit 2; }
       PRINT_MAC_IP="${!i}" ;;
     -h|--help)
-      sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n "2,${HELP_LAST_LINE}p" "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
@@ -62,6 +75,11 @@ log() { printf '%s %s\n' "$(date +'[%Y-%m-%d %H:%M:%S]')" "$*"; }
 current_location() {
   scselect 2>/dev/null | sed -n 's/^ \* .*(\(.*\))$/\1/p'
 }
+
+# Normalize a MAC for comparison. macOS ships bash 3.2, which has no
+# ${var,,} lowercase expansion, so use tr.
+norm_mac() { printf '%s' "$1" | tr 'A-Z' 'a-z'; }
+
 # Send one packet to <ip> so the kernel performs an ARP lookup and fills the
 # neighbour table. A closed UDP socket is enough: what matters is that the
 # packet forces resolution, and no answer is required. This avoids ping and
@@ -82,10 +100,6 @@ arp_lookup() {
   [[ "$line" == *"(incomplete)"* ]] && return 1
   printf '%s\n' "$line" | sed -n 's/.* at \([0-9a-fA-F:]\{11,17\}\) on .*/\1/p'
 }
-
-# Normalize a MAC for comparison. macOS ships bash 3.2, which has no
-# ${var,,} lowercase expansion, so use tr.
-norm_mac() { printf '%s' "$1" | tr 'A-Z' 'a-z'; }
 
 # Probe one characteristic device.
 #   exit 0 + prints MAC  -> present and MAC matches the configured one
@@ -111,22 +125,57 @@ probe_device() {
   return 1
 }
 
-read_config() {
-  local line
+# Load the rules from the sourced config file into parallel arrays.
+# Returns 0 on success, non-zero when the file is missing or unusable.
+load_config() {
   [[ -f "$CONFIG" ]] || return 1
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line%%#*}"                       # strip comments
-    line="$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    [[ -z "$line" ]] && continue
-    printf '%s\n' "$line"
-  done < "$CONFIG"
+
+  # The config is sourced: it is code, not data. Variables are unset right
+  # after reading so they cannot leak into anything this script runs later.
+  # shellcheck disable=SC1090
+  source "$CONFIG" || return 2
+
+  LOC_NAMES=()
+  LOC_IPS=()
+  LOC_MACS=()
+  local n name ip mac
+  for (( n = 1; n <= 64; n++ )); do
+    name="LOCATION_${n}_NAME"; ip="LOCATION_${n}_IP"; mac="LOCATION_${n}_MAC"
+    name="${!name:-}"; ip="${!ip:-}"; mac="${!mac:-}"
+    unset "LOCATION_${n}_NAME" "LOCATION_${n}_IP" "LOCATION_${n}_MAC"
+
+    [[ -z "$name$ip$mac" ]] && continue
+    if [[ -z "$name" || -z "$ip" || -z "$mac" ]]; then
+      log "config: LOCATION_$n is incomplete (need NAME, IP and MAC), skipping"
+      continue
+    fi
+    if [[ ! "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      log "config: LOCATION_$n has an invalid IP '$ip', skipping"
+      continue
+    fi
+    if [[ ! "$mac" =~ ^[0-9a-fA-F]{1,2}(:[0-9a-fA-F]{1,2}){5}$ ]]; then
+      log "config: LOCATION_$n has an invalid MAC '$mac', skipping"
+      continue
+    fi
+    # bash 3.2 + set -u errors on ${arr[*]} for an empty array, so guard it.
+    if [[ ${#LOC_NAMES[@]} -gt 0 && " ${LOC_NAMES[*]} " == *" $name "* ]]; then
+      log "config: duplicate location name '$name', skipping the later one"
+      continue
+    fi
+
+    LOC_NAMES+=("$name")
+    LOC_IPS+=("$ip")
+    LOC_MACS+=("$mac")
+  done
+
+  [[ ${#LOC_NAMES[@]} -gt 0 ]]
 }
 
 notify() {
   local message="$1"
   log "NOTIFY: $message"
   if [[ "$NOTIFY" == 1 ]]; then
-    osascript -e "display notification \"$message\" with title \"WiFiLocControl\"" \
+    osascript -e "display notification \"$message\" with title \"auto-network-location\"" \
       >/dev/null 2>&1 || log "notification failed"
   fi
 }
@@ -153,30 +202,26 @@ fi
 current="$(current_location)"
 log "current location: '${current:-?}'"
 
-if [[ ! -f "$CONFIG" ]]; then
-  log "config not found: $CONFIG"
-  log "create it with lines like: 192.0.2.1  00:00:5e:00:53:01 = Home"
+if ! load_config; then
+  log "cannot use config: $CONFIG"
+  log "expected a sourced file with groups like LOCATION_1_NAME / _IP / _MAC"
   exit 3
 fi
+
+log "loaded ${#LOC_NAMES[@]} location rule(s) from $CONFIG"
 
 matched_location=""
 matched_desc=""
 identity_mismatch=""
 
-while IFS= read -r line; do
-  # Expected: <ip> <mac> = <location>   |   DEFAULT = <location>
-  if [[ "$line" =~ ^DEFAULT[[:space:]]*=[[:space:]]*(.+)$ ]]; then
-    DEFAULT_LOCATION="${BASH_REMATCH[1]}"
-    continue
-  fi
-  if [[ "$line" =~ ^([0-9a-fA-F:.]+)[[:space:]]+([0-9a-fA-F:]{11,17})[[:space:]]*=[[:space:]]*(.+)$ ]]; then
-    ip="${BASH_REMATCH[1]}"; mac="${BASH_REMATCH[2]}"; loc="${BASH_REMATCH[3]}"
-  else
-    log "skipping unparsable config line: '$line'"
-    continue
-  fi
+idx=0
+while [[ $idx -lt ${#LOC_NAMES[@]} ]]; do
+  loc="${LOC_NAMES[$idx]}"
+  ip="${LOC_IPS[$idx]}"
+  mac="${LOC_MACS[$idx]}"
+  idx=$((idx + 1))
 
-  log "probing $ip for $loc (expect $mac)"
+  log "probing $ip for '$loc' (expect $mac)"
   if mac_seen="$(probe_device "$ip" "$mac")"; then
     log "  found $mac_seen at $ip -> '$loc'"
     matched_location="$loc"
@@ -188,7 +233,7 @@ while IFS= read -r line; do
   else
     log "  no answer from $ip"
   fi
-done < <(read_config)
+done
 
 if [[ -n "$matched_location" ]]; then
   if [[ "$matched_location" == "$current" ]]; then

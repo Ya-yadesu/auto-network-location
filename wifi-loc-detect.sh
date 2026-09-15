@@ -50,7 +50,7 @@ PROBE_PORT=33445    # UDP port used only to force an ARP lookup
 APPLY=0
 NOTIFY=0
 
-HELP_LAST_LINE=39   # last line of the comment block shown by --help
+HELP_LAST_LINE=41   # last line of the comment block shown by --help
 
 i=1
 while [[ $i -le $# ]]; do
@@ -229,7 +229,9 @@ while [[ $idx -lt ${#LOC_NAMES[@]} ]]; do
     break
   elif [[ -n "$mac_seen" ]]; then
     log "  device at $ip has MAC $mac_seen, expected $mac (identity mismatch)"
-    identity_mismatch="$ip $mac_seen"
+    # Only the address is kept for the notification: the observed MAC stays in
+    # the local log above (see the privacy note in AGENTS.md, section 8).
+    identity_mismatch="$ip"
   else
     log "  no answer from $ip"
   fi

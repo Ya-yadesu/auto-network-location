@@ -45,7 +45,7 @@ README.md            面向用户的设计与用法说明（英文）
 - 以下方式都能促使内核发出 ARP 并填充邻居表：`/dev/udp` 打开套接字、`nc -u`、`nc -tcp`、`curl`。**本项目用 `/dev/udp`**，因为它不需要调用任何外部命令。
 - 目标不存在时，条目会以 `(incomplete)` 出现——判断时必须把它当作「不在场」，不能当成 MAC。
 - 邻居表条目会老化失效；脚本因此带重试（默认 4 次 × 1 秒）。
-- `arp -n` 的输出格式：`? (192.0.2.1) at 00:00:5e:00:53:01 on en0 ifscope [ethernet]`。示例值取自 RFC 7042 的文档用 MAC 段 `00:00:5e:00:53:00/24`，不要换成真机 MAC。
+- `arp -n` 的输出格式：`? (192.0.2.1) at 00:00:5e:00:53:01 on en0 ifscope [ethernet]`。示例值取自留白段：MAC 用 RFC 7042 的 `00:00:5e:00:53:00/24`，IP 用 RFC 5737 的 `192.0.2.0/24`，不要换成真机值。
 
 ## 5. 环境与工具陷阱（都已实际踩过）
 
@@ -67,10 +67,13 @@ README.md            面向用户的设计与用法说明（英文）
 bash -n wifi-loc-detect.sh
 
 # 干跑（默认），用临时配置，不碰 ~/.wifi-loc-control、不改变系统状态
-MAC=$(arp -n 192.0.2.1 | sed -n 's/.* at \([0-9a-fA-F:]*\) on .*/\1/p')
+# 从本机邻居表现取一台在线设备，不要把地址写死成真机值
+IP=$(arp -an | sed -n 's/^? (\([0-9.]*\)) at \([0-9a-fA-F:]*\) on [a-z0-9]* .*/\1 \2/p' \
+     | grep -vE '^(224|239)\.| ff:ff:ff:ff:ff:ff' | head -1 | awk '{print $1}')
+MAC=$(arp -n "$IP" | sed -n 's/.* at \([0-9a-fA-F:]*\) on .*/\1/p')
 cat > /tmp/t.env <<EOF
 LOCATION_1_NAME="Home"
-LOCATION_1_IP="192.0.2.1"
+LOCATION_1_IP="$IP"
 LOCATION_1_MAC="$MAC"
 EOF
 WLC_CONFIG=/tmp/t.env ./wifi-loc-detect.sh
@@ -92,5 +95,5 @@ WLC_CONFIG=/tmp/t-bad.env ./wifi-loc-detect.sh
 
 ## 8. 隐私
 
-- 配置文件里的 IP/MAC 属于本机网络信息，**不要提交进仓库、不要粘进 issue**。仓库内文档与代码注释里的示例值只用留白值：MAC 用 RFC 7042 的 `00:00:5e:00:53:xx`，不要用真机 MAC。
+- 配置文件里的 IP/MAC 属于本机网络信息，**不要提交进仓库、不要粘进 issue**。仓库内文档、代码注释与**提交信息**里的示例值只用留白值：MAC 用 RFC 7042 的 `00:00:5e:00:53:xx`，IP 用 RFC 5737 的 `192.0.2.0/24`、`198.51.100.0/24`、`203.0.113.0/24`，不要用真机值。（提交信息也进历史，删工作区是删不掉的。）
 - 通知文案**不得包含 SSID、特征设备 MAC 或其特征地址**——通知会进通知中心、可能随 iCloud 同步，所以文案里不放任何定位信息，只留「地址与配置不符」这个结论。地址与 MAC 的具体值**只写本地日志**（`log`，即脚本 stdout）。

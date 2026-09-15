@@ -1,0 +1,22 @@
+# auto-network-location - network identification rules
+#
+# One characteristic device per network:
+#
+#     <device address>  <device MAC>  = <location name>
+#
+# The device must be present while the Mac is on that network, whether or not it
+# is the Mac's current gateway (an upstream router is a good choice).
+# Collect each line while connected to that network:
+#
+#     ./wifi-loc-detect.sh --print-mac <device address>
+#
+# Copy this file to ~/.wifi-loc-control/locations.conf and edit it.
+
+# Home network, identified by its upstream router
+192.0.2.1  00:00:5e:00:53:01 = Home
+
+# Another network, identified by its own router
+# 198.51.100.1   aa:bb:cc:dd:ee:ff = Office
+
+# Location used when no rule matches
+DEFAULT = Automatic

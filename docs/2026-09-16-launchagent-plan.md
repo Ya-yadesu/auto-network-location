@@ -471,7 +471,9 @@ Expected: `state` 是 `-rw-------`；`agent.log` 若在 Step 1 预置过也应�
 
 - [ ] **Step 4: 端到端——不手动运行脚本，让 agent 自己切回来（重复 3 轮）**
 
-先等 **65 秒**：`ThrottleInterval 60` 从**上一次启动**起算，而 Step 1 的 `bootstrap` 已因 `RunAtLoad` 跑过一轮；不等过这个窗口，`scselect` 引起的事件可能被整个抑制。
+先等 **65 秒**：`ThrottleInterval 60` 从**上一次启动**起算，而 Step 1 的 `bootstrap` 已因 `RunAtLoad` 跑过一轮。
+
+**`ThrottleInterval` 是延后补跑，不是丢弃**（2026-09-16 实测）：落在窗口内的 `WatchPaths` 事件不会被丢掉，而是等窗口一过就补跑一次——实测事件被推迟约 48–50 秒后仍然执行了。所以**观察窗口必须长于 60 秒**、**轮与轮之间也要隔开 60 秒以上**，否则你会把「被推迟」误读成「没反应」。（第一版配方用 45 秒窗口 + 70 秒间隔，三轮里两轮因此误判。）
 
 **开始前必须满足两个前提**，否则本轮作废：设备在邻居表里（`arp -n "$TARGET_IP"` 有 ` at `），以及**这期间没有人手动改 Wi-Fi 网络或关 Wi-Fi**。2026-09-16 曾因为忽略后者，把一次「设备真的不在场」的正确判断误读成探测缺陷。注意下面从本地配置推导目标地址——**不要把真机地址写进本文件**（AGENTS.md 第 8 节）。
 
@@ -479,22 +481,22 @@ Expected: `state` 是 `-rw-------`；`agent.log` 若在 Step 1 预置过也应�
 TARGET_IP=$(sed -n 's/^LOCATION_1_IP="\(.*\)"/\1/p' ~/.wifi-loc-control/locations.env)
 for round in 1 2 3; do
   echo "=== Round $round ==="
-  [ "$(scselect | sed -n 's/^ \* .*(\(.*\))$/\1/p')" = Home ] || { scselect Home >/dev/null; sleep 8; }
+  [ "$(scselect | sed -n 's/^ \* .*(\(.*\))$/\1/p')" = Home ] || { scselect Home >/dev/null; sleep 90; }
   echo "  设备: $(arp -n "$TARGET_IP" | grep -q ' at ' && echo 在场 || echo 不在场)"
   before=$(grep -c 'current location:' ~/.wifi-loc-control/agent.log)
   t0=$(date +%s); scselect Automatic >/dev/null; switched=no
-  for i in $(seq 1 15); do
+  for i in $(seq 1 30); do
     sleep 3
     if [ "$(scselect | sed -n 's/^ \* .*(\(.*\))$/\1/p')" = Home ]; then
       switched=yes; echo "  → 切回 Home，用时 ≈ $(( $(date +%s) - t0 ))s"; break; fi
   done
-  [ "$switched" = no ] && echo "  → 45s 内未切回；结束时设备: $(arp -n "$TARGET_IP" | grep -q ' at ' && echo 在场 || echo 不在场)"
+  [ "$switched" = no ] && echo "  → 90s 内未切回；结束时设备: $(arp -n "$TARGET_IP" | grep -q ' at ' && echo 在场 || echo 不在场)"
   grep -c 'current location:' ~/.wifi-loc-control/agent.log | sed 's/^/  累计轮数: /'
-  [ "$round" != 3 ] && sleep 70
+  [ "$round" != 3 ] && sleep 130
 done
 ```
 
-Expected: 每轮都在数秒内切回 `Home`，日志显示是 agent 触发的。**若某轮没切回**，先看那一刻设备是否在场：不在场说明本轮被中断（作废），在场则是真的没动作——记录时间与日志，作为第 7 节那个待查项的复发证据。**若某轮新增运行轮数 >=3，说明自触发没有收敛**，停下来记录日志，不要继续后面的任务。
+Expected: 每轮都在 90 秒内切回 `Home`（实测正常情况是 1–6 秒，被节流时约 50–60 秒），日志显示是 agent 触发的。**若某轮没切回**，先看那一刻设备是否在场：不在场说明本轮被中断（作废），在场则是真的没动作——记录时间与日志，作为第 7 节那个待查项的复发证据。**若某轮新增运行轮数 >=3，说明自触发没有收敛**，停下来记录日志，不要继续后面的任务。
 
 - [ ] **Step 5: 确认幂等（不出现连续多轮）**
 

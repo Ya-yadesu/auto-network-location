@@ -227,19 +227,36 @@ load_config() {
   [[ ${#LOC_NAMES[@]} -gt 0 ]]
 }
 
-# The state file records whether the user has already been told that the
-# current network cannot be identified, so a repeatedly triggered agent does
-# not repeat the notice. Only the literal value "away" counts: a missing,
-# empty or unknown value reads as "not told yet", so the failure direction is
-# one notice too many rather than one silently swallowed.
-# See docs/2026-09-16-launchagent-design.md.
+# The state file has two keys:
+#   state=default|ok|broken   what the user has been told about this state
+#   miss=N                    consecutive rounds the feature device was unconfirmed
+# Only the literal value "broken" counts as "already told": a missing, empty or
+# unknown value reads as "not told yet", so the failure direction is one notice
+# too many rather than one silently swallowed. An older single-value file reads
+# as "not told yet" too, so no migration is needed.
+# See docs/2026-09-16-decision-model-design.md.
 read_state() {
   [[ -f "$STATE" ]] || return 0
-  head -n 1 "$STATE" 2>/dev/null
+  sed -n 's/^state=//p' "$STATE" 2>/dev/null | head -n 1
 }
 
+read_miss() {
+  local n
+  n="$(sed -n 's/^miss=//p' "$STATE" 2>/dev/null | head -n 1)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  printf '%s' "$n"
+}
+
+# write_state <state> <miss>
+# Written through a temporary file in the same directory: a reader must never
+# see a half-written state, because two triggers can overlap.
 write_state() {
-  printf '%s\n' "$1" > "$STATE" 2>/dev/null || log "could not write state file: $STATE"
+  local tmp="${STATE}.tmp.$$"
+  if printf 'state=%s\nmiss=%s\n' "$1" "$2" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$STATE" 2>/dev/null || { rm -f "$tmp"; log "could not write state file: $STATE"; }
+  else
+    log "could not write state file: $STATE"
+  fi
 }
 
 # Print the notice to the log and, with --notify, deliver it. Returning
@@ -277,7 +294,9 @@ if [[ -n "${PRINT_MAC_IP:-}" ]]; then
   exit 1
 fi
 
-current="$(current_location)"
+# WLC_CUR lets the decision logic be tested without changing the machine's
+# real location; it is not meant to be set in normal use.
+current="${WLC_CUR:-$(current_location)}"
 log "current location: '${current:-?}'"
 
 if ! load_config; then
@@ -289,8 +308,9 @@ fi
 log "loaded ${#LOC_NAMES[@]} location rule(s) from $CONFIG"
 
 matched_location=""
+matched_idx=-1
 matched_desc=""
-identity_mismatch=0
+feature_state="absent"   # absent | mismatch -- only meaningful when nothing matched
 
 idx=0
 while [[ $idx -lt ${#LOC_NAMES[@]} ]]; do
@@ -303,62 +323,117 @@ while [[ $idx -lt ${#LOC_NAMES[@]} ]]; do
   if mac_seen="$(probe_device "$ip" "$mac")"; then
     log "  found $mac_seen at $ip -> '$loc'"
     matched_location="$loc"
+    matched_idx=$((idx - 1))
     matched_desc="$ip $mac_seen"
     break
   elif [[ -n "$mac_seen" ]]; then
     # The address and both MACs stay in this local log line only: nothing
     # identifying goes into a notification (see AGENTS.md, section 8).
     log "  device at $ip has MAC $mac_seen, expected $mac (identity mismatch)"
-    identity_mismatch=1
+    feature_state="mismatch"
   else
     log "  no answer from $ip"
   fi
 done
 
+# --- On a known network. The target device answers a second question: is this
+# --- still the network our settings were written for?
 if [[ -n "$matched_location" ]]; then
-  write_state ok
-  if [[ "$matched_location" == "$current" ]]; then
-    log "already in '$matched_location', nothing to do"
-    exit 0
-  fi
-  log "identified network as '$matched_location' ($matched_desc)"
-  if [[ "$APPLY" == 1 ]]; then
-    if scselect "$matched_location"; then
-      log "switched to '$matched_location'"
+  if [[ "$matched_location" != "$current" ]]; then
+    log "identified network as '$matched_location' ($matched_desc)"
+    if [[ "$APPLY" == 1 ]]; then
+      if scselect "$matched_location"; then
+        log "switched to '$matched_location'"
+      else
+        log "scselect '$matched_location' failed"
+        exit 1
+      fi
     else
-      log "scselect '$matched_location' failed"
-      exit 1
+      log "dry run: would switch to '$matched_location' (use --apply)"
+      exit 0
     fi
   else
-    log "dry run: would switch to '$matched_location' (use --apply)"
+    log "already in '$matched_location', nothing to do"
+  fi
+
+  tip="${LOC_TARGET_IPS[$matched_idx]}"
+  tmac="${LOC_TARGET_MACS[$matched_idx]}"
+  if [[ "$tip" == "${LOC_IPS[$matched_idx]}" ]] \
+     && [[ "$(norm_mac "$tmac")" == "$(norm_mac "${LOC_MACS[$matched_idx]}")" ]]; then
+    # Default case: both roles are the same device, so the probe above already
+    # answered for both. Do not probe twice.
+    target_ok=1
+    log "target device is the feature device; its answer stands for both"
+  else
+    log "probing $tip for '$matched_location' (target device, expect $tmac)"
+    if tmac_seen="$(probe_device "$tip" "$tmac")"; then
+      log "  found $tmac_seen at $tip -> target present"
+      target_ok=1
+    elif [[ -n "$tmac_seen" ]]; then
+      log "  device at $tip has MAC $tmac_seen, expected $tmac (target identity mismatch)"
+      target_ok=0
+    else
+      log "  no answer from $tip"
+      target_ok=0
+    fi
+  fi
+
+  if [[ "$target_ok" == 1 ]]; then
+    log "target device present; settings match this network"
+    write_state ok 0
+    exit 0
+  fi
+
+  # The network itself changed under us. Tell the user; do not quietly swap
+  # their static settings for DHCP.
+  if [[ "$NOTIFY" == 1 && "$(read_state)" == "broken" ]]; then
+    log "broken already reported, not notifying again"
+    exit 0
+  fi
+  if notify "The current network no longer matches the configured settings. Check the network settings."; then
+    [[ "$NOTIFY" == 1 ]] && write_state broken 0
   fi
   exit 0
 fi
 
-# No characteristic device answered.
+# --- Not on any known network. If we are not already on the default location,
+# --- fall back so the machine works on whatever network it is actually on.
+miss="$(read_miss)"
+
 if [[ "$current" == "$DEFAULT_LOCATION" ]]; then
-  write_state ok
-  log "no characteristic device found; already in '$DEFAULT_LOCATION', nothing to do"
+  log "not on a known network (feature device $feature_state); already in '$DEFAULT_LOCATION', nothing to do"
+  write_state default 0
   exit 0
 fi
 
-# No characteristic device answered and the current location is not the
-# default one: the user is away from every network we know about. Say so
-# once per departure.
-if [[ "$identity_mismatch" == 1 ]]; then
-  away_message="A configured address answered with an unexpected MAC. Check the network settings."
-else
-  away_message="Cannot identify the current network; the network settings may not match this environment."
+miss=$((miss + 1))
+if [[ "$miss" -lt 2 ]]; then
+  # Safety valve: one miss can be our own switch flushing the neighbour table,
+  # or a transient blip. Require two rounds before acting.
+  log "feature device $feature_state; miss $miss of 2 before falling back"
+  write_state "$(read_state)" "$miss"
+  exit 0
 fi
 
-if [[ "$NOTIFY" == 1 && "$(read_state)" == "away" ]]; then
-  log "away already reported, not notifying again"
-else
-  if notify "$away_message"; then
-    # Remember it only when the user was actually told: a manual run without
-    # --notify must not swallow the notice the agent would send later, and a
-    # failed delivery must be retried rather than recorded as delivered.
-    [[ "$NOTIFY" == 1 ]] && write_state away
+log "feature device $feature_state for $miss rounds; falling back to '$DEFAULT_LOCATION'"
+if [[ "$APPLY" == 1 ]]; then
+  if scselect "$DEFAULT_LOCATION"; then
+    log "switched to '$DEFAULT_LOCATION'"
+  else
+    log "scselect '$DEFAULT_LOCATION' failed"
+    exit 1
   fi
+else
+  log "dry run: would switch to '$DEFAULT_LOCATION' (use --apply)"
+  exit 0
+fi
+
+# The location really did change, so record it before telling anyone: a failed
+# notice here must not leave the state claiming we are somewhere we are not.
+write_state default 0
+if [[ "$feature_state" == "mismatch" ]]; then
+  notify "Left the known network: the device at the configured address was replaced. Switched back to the default location."
+else
+  notify "Left the known network. Switched back to the default location."
 fi
 exit 0

@@ -310,7 +310,7 @@ mkcfg() { printf 'LOCATION_1_NAME="Home"\nLOCATION_1_IP="%s"\nLOCATION_1_MAC="%s
             "$2" "$3" "$4" "$5" > "$1"; }
 # run <配置> <默认位置> <当前位置> [探测器的参数…]
 run()  { local cfg="$1" dflt="$2" cur="$3"; shift 3
-         WLC_CONFIG="$cfg" WLC_DEFAULT="$dflt" WLC_CUR="$cur" ./wifi-loc-detect.sh "$@" > "$T/out" 2>&1; }
+         WLC_CONFIG="$cfg" WLC_DEFAULT="$dflt" WLC_CUR="$cur" ./wifi-loc-detect.sh --apply --notify > "$T/out" 2>&1; }
 reset() { : > "$WLC_NOTIFY_LOG"; : > "$WLC_SCSELECT_LOG"; rm -f "$WLC_STATE"; }
 
 OK_CFG="$T/ok.env"; mkcfg "$OK_CFG" "$FIP" "$FMAC" "$FIP" "$FMAC"
@@ -324,13 +324,13 @@ has   "N2 判定为匹配"               "$T/out" "settings match"
 hasnt "N1 目标等于特征时不重复探测" "$T/out" "target device, expect"
 eq    "N2 不通知"                   0 "$(notify_count)"
 eq    "N2 不切换"                   0 "$(ss_count Home)"
-eq    "N2 状态 ok"                  ok "$(sed -n 's/^state=//p' "$WLC_STATE")"
+eq    "N2 状态 ok"                  ok "$(sed -n 's/^state=//p' "$WLC_STATE" 2>/dev/null)"
 
 # N3 —— 命中 + 目标掉线：broken，只通知一次，不切换
 reset; run "$BR_CFG" Automatic Home
 has "N3 进入 broken 并通知" "$T/out" "NOTIFY:"
 eq  "N3 通知一次"           1 "$(notify_count)"
-eq  "N3 状态 broken"        broken "$(sed -n 's/^state=//p' "$WLC_STATE")"
+eq  "N3 状态 broken"        broken "$(sed -n 's/^state=//p' "$WLC_STATE" 2>/dev/null)"
 eq  "N3 不切换"             0 "$(ss_count Home)"
 run "$BR_CFG" Automatic Home
 has "N3 第二轮被抑制"       "$T/out" "already reported"
@@ -338,12 +338,12 @@ eq  "N3 通知仍是 1 次"      1 "$(notify_count)"
 
 # N5 —— 目标恢复回 ok；再坏一次会再通知
 run "$OK_CFG" Automatic Home
-eq "N5 目标恢复回 ok"  ok "$(sed -n 's/^state=//p' "$WLC_STATE")"
+eq "N5 目标恢复回 ok"  ok "$(sed -n 's/^state=//p' "$WLC_STATE" 2>/dev/null)"
 run "$BR_CFG" Automatic Home
 eq "N5 再坏会再通知"   2 "$(notify_count)"
 
 # N4 —— 在默认位置时命中：先切换、再核对目标（scselect 是桩，不动真机）
-reset; run "$BR_CFG" Automatic Automatic --apply
+reset; run "$BR_CFG" Automatic Automatic
 has   "N4 识别并切换"        "$T/out" "switched to 'Home'"
 eq    "N4 真的调用了切换"    1 "$(ss_count Home)"
 order "N4 先切换后核对目标"  "switched to 'Home'" "$T/out" "target device, expect"
@@ -353,13 +353,13 @@ has   "N4 目标掉线判 broken"  "$T/out" "NOTIFY:"
 reset; run "$NO_CFG" Automatic Automatic
 has "N10 无动作"       "$T/out" "nothing to do"
 eq  "N10 不通知"       0 "$(notify_count)"
-eq  "N10 状态 default" default "$(sed -n 's/^state=//p' "$WLC_STATE")"
+eq  "N10 状态 default" default "$(sed -n 's/^state=//p' "$WLC_STATE" 2>/dev/null)"
 eq  "N10 不切换"       0 "$(ss_count Automatic)"
 
 # N6 —— 特征不可达一轮且不在默认位置：安全阀，不回落
 reset; run "$NO_CFG" Automatic Home
 has "N6 第一轮不回落" "$T/out" "miss 1 of 2"
-eq  "N6 miss=1"       1 "$(sed -n 's/^miss=//p' "$WLC_STATE")"
+eq  "N6 miss=1"       1 "$(sed -n 's/^miss=//p' "$WLC_STATE" 2>/dev/null)"
 eq  "N6 不通知"       0 "$(notify_count)"
 eq  "N6 不切换"       0 "$(ss_count Automatic)"
 
@@ -368,8 +368,8 @@ run "$NO_CFG" Automatic Home
 has "N7 回落"         "$T/out" "falling back to 'Automatic'"
 eq  "N7 调用了回落"   1 "$(ss_count Automatic)"
 eq  "N7 通知一次"     1 "$(notify_count)"
-eq  "N7 状态 default" default "$(sed -n 's/^state=//p' "$WLC_STATE")"
-eq  "N7 miss 归零"    0 "$(sed -n 's/^miss=//p' "$WLC_STATE")"
+eq  "N7 状态 default" default "$(sed -n 's/^state=//p' "$WLC_STATE" 2>/dev/null)"
+eq  "N7 miss 归零"    0 "$(sed -n 's/^miss=//p' "$WLC_STATE" 2>/dev/null)"
 
 # N11 —— 回落之后再跑一轮：不重复通知
 run "$NO_CFG" Automatic Automatic
@@ -377,7 +377,7 @@ eq "N11 不重复通知" 1 "$(notify_count)"
 
 # N9 —— 未确认一轮后又确认：miss 归零（安全阀不攒着）
 reset; run "$NO_CFG" Automatic Home; run "$OK_CFG" Automatic Home
-eq "N9 确认后 miss 归零" 0 "$(sed -n 's/^miss=//p' "$WLC_STATE")"
+eq "N9 确认后 miss 归零" 0 "$(sed -n 's/^miss=//p' "$WLC_STATE" 2>/dev/null)"
 
 # N8 —— 特征地址被别的设备占用（真实在线地址 + 错 MAC）：同样回落
 reset; run "$MM_CFG" Automatic Home; run "$MM_CFG" Automatic Home

@@ -3,7 +3,7 @@
 # wifi-loc-detect.sh - decide which network location the current network
 # belongs to, based on whether a characteristic device is present.
 #
-# Design (settled 2026-09-15):
+# Design (settled 2026-09-16):
 #   * Each known network is identified by ONE characteristic device: its
 #     address and its MAC. The device must be present while the Mac is on that
 #     network, whether or not it is the Mac's current gateway (an upstream
@@ -13,11 +13,17 @@
 #     MAC is read from the neighbour table (`arp -n`). This works even when
 #     the device is not the current gateway, and it works in restricted
 #     environments where ping/traceroute are unavailable.
-#   * Only ONE direction is automatic: a known network is entered
-#     (Automatic -> that location). If the characteristic device is absent
-#     while in a non-default location, the user is notified instead of being
-#     switched, because at layer-2 level that can mean a real configuration
-#     change that a script should not guess about.
+#   * A second, optional device answers a different question: the TARGET
+#     device, normally the one this location's own settings depend on (its
+#     gateway or DNS). It defaults to the characteristic device, so a network
+#     that needs no separate check needs no separate configuration.
+#   * Both directions are automatic, but only leaving is unconditional:
+#       - the characteristic device is present -> enter that location;
+#       - it stays gone for two consecutive checks -> fall back to the default
+#         location, so the machine works on whatever network it is on;
+#       - the location matches but its TARGET device is gone -> notify and
+#         leave the settings alone, because the network itself changed and
+#         switching would silently replace them with DHCP.
 #   * Switching locations is hot: scselect applies the new configuration
 #     immediately, without changing the Wi-Fi network.
 #
@@ -27,6 +33,9 @@
 #     LOCATION_1_NAME="Home"
 #     LOCATION_1_IP="192.0.2.1"
 #     LOCATION_1_MAC="00:00:5e:00:53:01"
+#     # optional; defaults to the device above
+#     LOCATION_1_TARGET_IP="192.0.2.100"
+#     LOCATION_1_TARGET_MAC="00:00:5e:00:53:02"
 #
 # The location name is a value, not a variable name, so it may contain spaces
 # and non-ASCII characters. Because the file is sourced, it is code: keep it
@@ -36,7 +45,7 @@
 #   ./wifi-loc-detect.sh                    # dry run: print the decision only
 #   ./wifi-loc-detect.sh --apply            # actually run scselect
 #   ./wifi-loc-detect.sh --apply --notify   # notify once when the network
-#                                           # cannot be identified
+#                                           # changed, or when we left one
 #   ./wifi-loc-detect.sh --print-mac <ip>   # helper: show the MAC for an IP,
 #                                           # to fill in the config file
 #
@@ -51,8 +60,6 @@ STATE="${WLC_STATE:-$HOME/.wifi-loc-control/state}"
 APPLY=0
 NOTIFY=0
 
-HELP_LAST_LINE=41   # last line of the comment block shown by --help
-
 i=1
 while [[ $i -le $# ]]; do
   arg="${!i}"
@@ -64,7 +71,11 @@ while [[ $i -le $# ]]; do
       [[ $i -gt $# ]] && { echo "--print-mac needs an IP" >&2; exit 2; }
       PRINT_MAC_IP="${!i}" ;;
     -h|--help)
-      sed -n "2,${HELP_LAST_LINE}p" "$0" | sed 's/^# \{0,1\}//'
+      # Print the leading comment block. Stopping at the first code line
+      # instead of a fixed line number means editing the header can no longer
+      # silently truncate or overrun the help text.
+      awk 'NR > 1 && /^set -uo pipefail/ { exit }
+           NR > 1 { sub(/^# ?/, ""); print }' "$0"
       exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac

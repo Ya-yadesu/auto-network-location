@@ -1,5 +1,7 @@
 # LaunchAgent（事件驱动触发层）实施计划
 
+**状态：已执行**——6 个任务全部完成并验证（2026-09-16）。步骤前的方框未逐条勾选，但每一步的结果都记在 `AGENTS.md` 第 6 节。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 给已经实测通过的探测器接上 launchd 触发层，使加入已知网络时自动切换位置、离开时只通知一次。

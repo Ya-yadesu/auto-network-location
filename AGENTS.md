@@ -24,15 +24,15 @@ docs/                                     设计与实施文档（中文）
 1. **不读 SSID/BSSID。** 原因见第 3 节。不要以任何形式回退到 SSID 方案。
 2. **不需要 root。** 切换位置用 `scselect`（已实测免提权）。任何需要 `sudo` 的设计都要先重新论证。
 3. **探针走二层，不用 ICMP、不用 raw socket。** 手段是「向目标地址发包促使内核做 ARP 解析，再读 `arp -n`」。这样不依赖设备响应 ICMP，也不受受限环境影响。
-4. **IP + MAC 双匹配。** 只匹配 IP 会在「另一个网络也有同地址设备」时误判；MAC 不匹配必须报为身份不符，而不是当作命中。
-5. **自动化只做「进入」方向。** 从 `Automatic` 切到识别出的位置是自动的；从非默认位置退出**只通知、不自动切**。理由是二层层面「设备消失」可能意味着真实配置变动，不该由脚本猜。
+4. **IP + MAC 双匹配。** 只匹配 IP 会在「另一个网络也有同地址设备」时误判；MAC 不匹配必须报为身份不符，而不是当作命中。这条对**特征设备与目标设备都适用**。
+5. **两个方向都自动化，但只有「离开」会回落到默认位置。** 进入已知位置是自动的；特征设备连续两轮未确认（`miss` 安全阀）时自动回落到默认位置，让机器在任何网络上都能用；而**在某个已知位置内发现目标设备不符时，只通知、不回落**——那说明这张网本身变了，擅自动作会把静态设置悄悄换成 DHCP。两者靠**特征设备**（我在哪张网上）与**目标设备**（这张网还是我设置里期待的那张吗，默认取特征设备）区分，见 `docs/2026-09-16-decision-model-design.md`。
 6. **幂等。** 已在目标位置就什么都不做。切换动作本身会改写 `SystemConfiguration`，会再次触发自己，必须靠幂等收敛。
 7. **纯 bash 3.2。** macOS 自带 bash 是 3.2，**没有** `${var,,}`、`mapfile`、关联数组等 bash 4+ 特性。已因此写错过一次判断方向（见第 5 节）。
 8. **配置是 env 文件、按编号成组。** `~/.wifi-loc-control/locations.env`，形如 `LOCATION_n_NAME/_IP/_MAC`。位置名是**变量值**而不是变量名，所以允许空格与非 ASCII。不要改回「变量名 = 位置名」的写法——那会把位置名限制成合法标识符。
 9. **配置文件是被 `source` 的代码，不是被解析的数据。** 读取后立即 `unset` 掉 `LOCATION_*`，避免泄漏给子进程。新增配置项时保持这个模式，并在文档里提醒用户该文件的权限（600）与来源可信。
 10. **零依赖。** 只用 macOS 自带命令。
 11. 面向用户的字符串、注释、README 用**英文**；本文件与代理工作笔记用**中文**。
-12. **通知去重靠状态文件，其含义是「用户是否已被告知离家」，不是「上次判定」。** 判定 `ok` 一律重置；只有**真的送达**了才写 `away`。这样手动跑（不带 `--notify`）不会污染状态，投递失败也不会被记成已送达，两者都不会让 agent 漏掉本该发的通知。改动这段逻辑前先读 `docs/2026-09-16-launchagent-design.md` 第 3 节的状态转移表。
+12. **通知去重靠状态文件，其含义是「用户当前是否已被告知一个异常状态」。** `ok` / `default` 一律重置；只有**真的送达**了才写 `broken`。这样手动跑（不带 `--notify`）不会污染状态，投递失败也不会被记成已送达，两者都不会让 agent 漏掉本该发的通知。**唯一的例外是回落**：位置真的切了，所以先记 `default` 再通知——不能因为通知失败就把状态写成「还在别处」。状态文件还存 `miss`（特征设备连续未确认的轮数）。改动这段逻辑前先读 `docs/2026-09-16-decision-model-design.md` 第 3 节的状态转移表。
 
 ## 3. 为什么不能用 SSID（实测，macOS 27.0 / 26A428）
 
@@ -99,89 +99,35 @@ sed 's/LOCATION_1_MAC=.*/LOCATION_1_MAC="de:ad:be:ef:00:01"/' /tmp/t.env > /tmp/
 WLC_CONFIG=/tmp/t-bad.env ./wifi-loc-detect.sh
 ```
 
-已覆盖的用例（2026-09-16 全部通过）：MAC 匹配且已在目标位置、MAC 身份不符、多条目先命中、命中但位置不同（干跑提示不执行）、非法 IP / 不完整组被跳过、位置名含空格与非 ASCII、同一 MAC 的补零与非补零写法等价（`norm_mac`）、`--print-mac`、`--help`、配置缺失（退出码 3）、参数缺失（退出码 2）。
+已覆盖的用例（2026-09-16 全部通过）：MAC 匹配且已在目标位置、命中但位置不同（干跑提示不执行）、MAC 身份不符、多条目先命中、非法与**越界** IP / 非法 MAC / 不完整组被跳过、名字含空格时不算重名、位置名含空格与非 ASCII、同一 MAC 的补零与非补零写法等价、目标字段缺省取特征设备、目标字段非法则整组跳过、`--print-mac`（含无应答退出码 1）、`--help`（含 `--print-mac` 两行）、配置缺失（退出码 3）、参数缺失与未知参数（退出码 2）。
 
-**通知状态机的验证配方**（2026-09-16 实测 11 条断言全通过）。关键技巧是**桩 `osascript`**：把它放进临时 `PATH`，就能精确数出「通知真的发了几次」，而且不会弹出任何通知。
+### 三份可复用的配方
 
-```sh
-#!/bin/bash
-# V2: the notification transition state machine.
-set -u
-cd "$(git rev-parse --show-toplevel)" || exit 1
-T=$(mktemp -d); STUB="$T/bin"; mkdir -p "$STUB"
-cat > "$STUB/osascript" <<'STUBEOF'
-#!/bin/sh
-echo called >> "$WLC_NOTIFY_LOG"
-STUBEOF
-chmod +x "$STUB/osascript"
+三份都用**桩**：`osascript` 让通知只记账不弹出，`scselect` 让切换只记账、**不改动本机位置**，两者放进临时 `PATH`。它们写在 `/tmp` 下（会话结束不留存），需要时按下面的清单重建；判定层那 37 条断言的完整脚本在 `docs/2026-09-16-decision-model-plan.md` 的 Task 2 Step 1。
 
-# a live device for the "matched" case, an unroutable address for "away"
-IP=$(arp -an | sed -n 's/^? (\([0-9.]*\)) at \([0-9a-fA-F:]*\) on [a-z0-9]* .*/\1 \2/p' \
-     | grep -vE '^(224|239)\.| ff:ff:ff:ff:ff:ff' | head -1 | awk '{print $1}')
-MAC=$(arp -n "$IP" | sed -n 's/.* at \([0-9a-fA-F:]*\) on .*/\1/p')
-printf 'LOCATION_1_NAME="Home"\nLOCATION_1_IP="%s"\nLOCATION_1_MAC="%s"\n' "$IP" "$MAC" > "$T/here.env"
-printf 'LOCATION_1_NAME="Home"\nLOCATION_1_IP="203.0.113.7"\nLOCATION_1_MAC="de:ad:be:ef:00:01"\n' > "$T/away.env"
-
-export WLC_STATE="$T/state" WLC_NOTIFY_LOG="$T/notify.log"
-: > "$WLC_NOTIFY_LOG"
-pass=0; fail=0
-check_eq()  { if [ "$2" = "$3" ]; then pass=$((pass+1)); echo "PASS  $1";
-              else fail=$((fail+1)); echo "FAIL  $1 (want [$2], got [$3])"; fi; }
-check_has() { if grep -q "$3" "$2" 2>/dev/null; then pass=$((pass+1)); echo "PASS  $1";
-              else fail=$((fail+1)); echo "FAIL  $1 (no /$3/ in $2)"; fi; }
-count()     { wc -l < "$WLC_NOTIFY_LOG" | tr -d ' '; }
-runs() { WLC_CONFIG="$T/$1.env" WLC_DEFAULT=Nowhere PATH="$STUB:$PATH" \
-         ./wifi-loc-detect.sh --apply --notify > "$T/out.$2" 2>&1; }
-
-runs away 1
-check_eq  "1st away notifies"                 1 "$(count)"
-check_eq  "1st away records state=away"       away "$(cat "$WLC_STATE" 2>/dev/null)"
-runs away 2
-check_eq  "2nd away does not notify"          1 "$(count)"
-check_has "2nd away logs the suppression"     "$T/out.2" 'away already reported'
-
-runs here 3
-check_eq  "matching network resets state=ok"  ok "$(cat "$WLC_STATE" 2>/dev/null)"
-
-# A manual run (no --notify) must not swallow the notice the agent would send.
-: > "$WLC_NOTIFY_LOG"; rm -f "$WLC_STATE"
-WLC_CONFIG="$T/away.env" WLC_DEFAULT=Nowhere PATH="$STUB:$PATH" \
-  ./wifi-loc-detect.sh --apply > "$T/out.4" 2>&1
-check_eq  "manual away does not notify"       0 "$(count)"
-check_eq  "manual away leaves state unset"    "" "$(cat "$WLC_STATE" 2>/dev/null)"
-runs away 5
-check_eq  "agent notifies after a manual run" 1 "$(count)"
-
-# A failed delivery must not be recorded as delivered, or the notice is lost.
-BADSTUB="$T/badbin"; mkdir -p "$BADSTUB"
-printf '#!/bin/sh\nexit 1\n' > "$BADSTUB/osascript"; chmod +x "$BADSTUB/osascript"
-: > "$WLC_NOTIFY_LOG"; rm -f "$WLC_STATE"
-WLC_CONFIG="$T/away.env" WLC_DEFAULT=Nowhere PATH="$BADSTUB:$PATH" \
-  ./wifi-loc-detect.sh --apply --notify > "$T/out.6" 2>&1
-check_eq  "failed delivery leaves state unset" "" "$(cat "$WLC_STATE" 2>/dev/null)"
-check_has "failed delivery is logged"          "$T/out.6" 'notification failed'
-runs away 7
-check_eq  "a later successful run notifies"    1 "$(count)"
-
-rm -rf "$T"
-echo "=== $pass passed, $fail failed ==="
-```
+1. **配置层** —— 10 条断言：目标字段的默认与校验，含「名字含空格时不算重名」与「越界 IP 被跳过」两条回归。
+2. **判定层** —— 37 条断言，约 90 秒：设计文档 N1–N12 全覆盖（`ok` / `broken` 去重 / 先切换后核对目标 / `miss` 安全阀 / 回落与回落通知 / 身份不符也回落 / 旧格式状态文件）。**必须像 agent 一样带 `--apply --notify`**，否则通知与状态写入根本不会被走到——第一次写这份配方时正是漏了这两个参数，被 14 条失败打回来。
+3. **通知状态机** —— 15 条断言：目标在场不通知、`broken` 只通知一次、手动跑（不带 `--notify`）不写状态也不吞掉以后的通知、投递失败不记账且下一轮重试、确认后 `miss` 归零。
 
 **已验证**：
 
-- 判定逻辑（脚本层，2026-09-16 实测）：`--apply` 的进入方向真实切换成功；离家判定只通知不切换；彻底关掉 Wi-Fi 同样只通知不切换；通知文案不含地址与 MAC。
-- 通知状态机：上面那份配方 11 条断言全通过。
-- **触发层（LaunchAgent，2026-09-16 全部无人干预）**：
-  - 进入方向：`RunAtLoad` 那一轮读到 `current location: 'Automatic'`、探到特征设备后 **1 秒**内自己切到 `Home`；另一轮 **6 秒**。
-  - 事件驱动：`scselect` 改动 `SystemConfiguration` 即触发一轮。
-  - **离家去重**：在手机热点上待约 2 分钟，agent 自己发现设备不可达、**只弹一次**通知、不切换，`state` 写 `away`；60 秒后那一轮打印 `away already reported, not notifying again`，不再打扰。
-  - 回到已知网络后 `state` 自动回到 `ok`。
-  - 幂等与自触发收敛：切换自己引发的那一轮读 `already in 'Home'`、位置不变，没有失控。
-  - **唤醒（2026-09-16 实测，合盖 5 分钟）**：真正的唤醒（`pmset -g log` 里的 `Wake ... lid`）之后 **32 秒**跑了一轮并正常探到设备；合盖期间的 DarkWake 里也有两轮事件驱动的运行（不在 300 秒网格上）。**不需要常驻轮询方案**——所以原设计的备选方案 2 可以确定放弃。
+- 判定逻辑（脚本层）：进入方向真实切换；特征设备连续两轮未确认时**回落到默认位置并通知**；目标设备不符时**只通知、不回落**；通知文案不含地址与 MAC。
+- 三份配方全通过（10 + 37 + 15 条断言）。
+- **触发层（LaunchAgent，全部无人干预）**：`RunAtLoad` 那轮读到 `Automatic`、**1 秒**内切到 `Home`；`scselect` 改动即触发一轮；热点上只弹一次通知、60 秒后那轮打印抑制行；回落；唤醒后 **32 秒**触发一轮；幂等收敛、无失控、无需常驻轮询。
 
 **尚未验证 / 待查**：
 
-- **`10:49:38` 那次连续 8 秒 `no answer`**（当时使用者确认在家里网络上）。未复现；复发时按 `docs/2026-09-16-launchagent-design.md` 第 7 节取证，**不要凭推理改探测逻辑**。
+线上 `agent.log` 共 5 次 `no answer`，其中 4 次有明确原因，1 次待查：
+
+| 时间 | 当时位置 | 归因 |
+|---|---|---|
+| 10:49:38 | `Automatic` | **待查**——使用者确认当时在家庭网络上，未复现 |
+| 10:58:21 | `Home` | 使用者手动切到手机热点（10:58:07 与 10:59:03 设备均在场）|
+| 11:08:26 | `Home` | 刻意的热点测试第一轮（通知一次）|
+| 11:09:27 | `Home` | 同一测试第二轮（被去重抑制）|
+| 11:56:52 | `Home` | 使用者手动切到手机热点（其下一条消息即在问热点下为何不切）|
+
+连续两轮只出现过一次，且那次是真离开，所以 **`miss >= 2` 目前没有反例**；若将来观察到「在家里连续两轮未确认」，把阀值提到 3，并把依据补在这张表下面。另外两处未知：目标设备**真的**下线（R3S 掉电）未实测，只用未应答地址模拟过；回落通知投递失败不会重试（见 README 已知限制）。
 
 ## 7. 路线图
 

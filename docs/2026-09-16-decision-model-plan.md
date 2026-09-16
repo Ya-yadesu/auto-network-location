@@ -1,5 +1,7 @@
 # 决策模型更正 实施计划（目标设备 + 回落）
 
+**状态：执行中**——Task 1 与 Task 2 已完成并验证；Task 3（文档）进行中；Task 4（线上配置与真实端到端）待使用者配合。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 让「离开已知网络」自动回落到默认位置（并通知），同时让「还在那张网上、但环境与设置不符」只通知、不回落。

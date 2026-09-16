@@ -42,22 +42,32 @@ Properties of this probe:
 
 ## Scope of the automation
 
-Only one direction is automatic. Entering a known location is automatic;
-leaving one is not.
+Both directions are automatic, but only leaving is unconditional.
 
 | Current state | Probe result | Action |
 |---|---|---|
 | `Automatic` | matches a known network | switch to that location |
-| in that location | matches | nothing (idempotent) |
-| in a location | no match | **notify** the user, do not switch |
-| `Automatic` | no match | nothing (already the default) |
+| in that location | matches, target device present | nothing (idempotent) |
+| in that location | matches, target device missing | **notify**, do not switch |
+| in any location | no known network found | **switch back to the default location** |
 
-Leaving a non-default location is not automated on purpose: a device that stops
-answering ARP can mean a real change (cabling, router swap, MAC change) that a
-script should not silently guess about. A notification tells you to check the
-network settings — the failure mode this project exists to remove is exactly
-"static settings applied to the wrong network", and silently switching away can
-mask it.
+A network is described by two devices. The *characteristic* device answers "which
+network is this"; the optional *target* device answers "is this still the network
+my settings were written for". The target defaults to the characteristic device,
+so a network that needs no separate check needs no extra configuration.
+
+Leaving is detected when the characteristic device stays gone for **two
+consecutive checks**, and the Mac is returned to the default location
+(`Automatic`, unless `WLC_DEFAULT` says otherwise) so that it works on whatever
+network it is actually on. Two checks rather than one, because switching a
+location flushes the neighbour table and can look like a departure for a single
+check.
+
+A network that is still there but no longer matches — the device your settings
+depend on is gone, or the address now belongs to something else — is a different
+case. That one is reported rather than papered over, because switching away would
+silently replace your static settings with DHCP, which is exactly the failure
+this project exists to remove.
 
 To use the upstream router temporarily while staying in a location, edit that
 location's settings directly. Location switching and temporary gateway changes
@@ -99,6 +109,13 @@ LOCATION_1_NAME="Home"
 LOCATION_1_IP="192.0.2.1"
 LOCATION_1_MAC="00:00:5e:00:53:01"
 
+# Optional: the device this location's own settings depend on (its gateway or
+# DNS). Omit it and the characteristic device above is used. If you give one,
+# give it in full: a malformed target skips the whole group rather than being
+# silently ignored.
+# LOCATION_1_TARGET_IP="192.0.2.100"
+# LOCATION_1_TARGET_MAC="00:00:5e:00:53:02"
+
 # LOCATION_2_NAME="Office"
 # LOCATION_2_IP="198.51.100.1"
 # LOCATION_2_MAC="aa:bb:cc:dd:ee:ff"
@@ -118,12 +135,16 @@ Find the MAC from the network itself, while connected to it:
 ./wifi-loc-detect.sh --print-mac 192.0.2.1
 ```
 
-Each location needs its own group collected on its own network. A location's
-device must be present from both the `Automatic` and that location's state — an
-upstream router satisfies that for a home network.
+Each location needs its own group collected on its own network. The
+characteristic device must be present from both the `Automatic` and that
+location's state — an upstream router satisfies that for a home network. If the
+location's settings point at a different box (its gateway or DNS), name that box
+as `LOCATION_n_TARGET_IP` / `_TARGET_MAC`; otherwise the two roles collapse into
+one and the second check never fires.
 
-When no group matches, the script switches to the default location, which is
-`Automatic` (override with the `WLC_DEFAULT` environment variable).
+When no group matches, the script falls back to the default location, which is
+`Automatic` (override with the `WLC_DEFAULT` environment variable) — but only
+after the characteristic device has been missing for two consecutive checks.
 
 ### 3. Try it
 
@@ -137,12 +158,13 @@ When no group matches, the script switches to the default location, which is
 ```
 ./wifi-loc-detect.sh                    dry run, prints what it decided and why
 ./wifi-loc-detect.sh --apply            actually switch locations
-./wifi-loc-detect.sh --apply --notify   also notify when the current network
-                                        cannot be identified, once per departure
+./wifi-loc-detect.sh --apply --notify   also notify: once when this network no
+                                        longer matches, and once per departure
 ./wifi-loc-detect.sh --print-mac <ip>   print the MAC for an IP (config helper)
 ```
 
-Exit codes: `0` fine, `2` bad usage, `3` config missing.
+Exit codes: `0` fine, `1` a switch or a MAC lookup failed, `2` bad usage, `3`
+config missing.
 
 ## Running automatically
 
@@ -174,9 +196,10 @@ rm ~/Library/LaunchAgents/com.yayadesu.auto-network-location.plist
 ```
 
 The job watches `/Library/Preferences/SystemConfiguration` and also runs every
-300 seconds as a safety net. It switches only when a known network is entered;
-when the current network cannot be identified it notifies **once per
-departure**, not once per trigger.
+300 seconds as a safety net. It enters a known network when it appears, returns
+to the default location once the characteristic device has been gone for two
+consecutive checks, and notifies when the network it is on no longer matches the
+configured settings — once per state, not once per trigger.
 
 Two prerequisites and two caveats:
 
@@ -190,30 +213,38 @@ Two prerequisites and two caveats:
   is asleep. Expect the switch to happen on the next event or within five
   minutes of waking.
 - The log file grows without bound and is safe to delete; the state file that
-  tracks the away notice is separate.
+  records what has already been reported is separate.
 
 ## Known limitations
 
 - **Automatic operation is verified.** With the LaunchAgent loaded, the location
-  is switched unattended when a known network is entered, and an unidentifiable
-  network is reported once per departure rather than once per trigger. Waking
-  from sleep was measured: a run happens about thirty seconds after the lid
-  opens, and the 300-second fallback bounds the worst case at five minutes.
-  `WatchPaths` is race-prone, so a missed event is caught by that fallback
-  rather than immediately.
-- Leaving a non-default location needs a human decision (a notification, not a
-  switch), by design.
-- A characteristic device that is powered off makes its network unidentifiable.
-- Only one characteristic device per network is supported; a collision needs a
-  different device or a future multi-condition rule.
+  is switched unattended when a known network is entered, and the machine is
+  returned to the default location after leaving one. Waking from sleep was
+  measured: a run happens about thirty seconds after the lid opens, and the
+  300-second fallback bounds the worst case at five minutes. `WatchPaths` is
+  race-prone, so a missed event is caught by that fallback rather than
+  immediately.
+- **Leaving takes two consecutive checks to confirm**, so the fallback can come
+  one check after the departure: about 60 seconds while the network is busy, up
+  to a 5-minute `StartInterval` when nothing else is happening.
+- **The notice that the machine was returned to the default location is not
+  retried** if delivery fails: the location has already changed and there is
+  nowhere reliable to remember an unsent notice. The "network no longer matches"
+  notice does retry — it is only recorded once it has been delivered.
+- Both devices must match address *and* MAC. A characteristic device that is
+  powered off, or whose address has been taken over by something else, makes its
+  network unidentifiable.
+- Only one characteristic device and one target device per network; a collision
+  needs a different device or a future multi-condition rule.
 - IPv6 state is per location and must be set per location; it is not inferred.
 
 ## Roadmap
 
-1. **Detector** — this script. Decision only, `--apply` to switch. *(done)*
+1. **Detector** — this script. Decide, and switch with `--apply`. *(done)*
 2. **Event-driven daemon** — a LaunchAgent on `WatchPaths` over
    `/Library/Preferences/SystemConfiguration/`, with de-duplication: switching a
    location rewrites that directory and therefore triggers the agent again.
+   *(done)*
 3. **Menu bar** — show the current location and allow switching from the menu,
    since macOS no longer exposes any location UI.
 

@@ -146,9 +146,13 @@ Exit codes: `0` fine, `2` bad usage, `3` config missing.
 
 ## Known limitations
 
-- **The "away" case is not yet verified on real hardware.** Whether the
-  characteristic device disappears from the neighbour table exactly when the Mac
-  leaves that network has been observed, but not across a real departure.
+- **The "away" case is verified across a network change, not a real departure.**
+  With the Mac left in a non-default location and joined to a different network,
+  the characteristic device left the neighbour table — no stale entry remained —
+  and the script reported it as absent and posted a notification instead of
+  switching. Leaving Wi-Fi entirely is not covered by that run. Automatic
+  *triggering* is a separate matter and still absent: there is no LaunchAgent
+  yet, so the script is run by hand.
 - Leaving a non-default location needs a human decision (a notification, not a
   switch), by design.
 - A characteristic device that is powered off makes its network unidentifiable.

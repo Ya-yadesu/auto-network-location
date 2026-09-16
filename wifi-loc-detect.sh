@@ -19,8 +19,11 @@
 #     that needs no separate check needs no separate configuration.
 #   * Both directions are automatic, but only leaving is unconditional:
 #       - the characteristic device is present -> enter that location;
-#       - it stays gone for two consecutive checks -> fall back to the default
-#         location, so the machine works on whatever network it is on;
+#       - it is gone, or the address now belongs to another device -> fall back
+#         to the default location at once, so the machine works on whatever
+#         network it is on, then look once more inside the same run after 15
+#         seconds: if the device turns up, that was a single bad reading and we
+#         go straight back, silently;
 #       - the location matches but its TARGET device is gone -> notify and
 #         leave the settings alone, because the network itself changed and
 #         switching would silently replace them with DHCP.
@@ -44,8 +47,9 @@
 # Usage:
 #   ./wifi-loc-detect.sh                    # dry run: print the decision only
 #   ./wifi-loc-detect.sh --apply            # actually run scselect
-#   ./wifi-loc-detect.sh --apply --notify   # notify once when the network
-#                                           # changed, or when we left one
+#   ./wifi-loc-detect.sh --apply --notify   # notify when the network no longer
+#                                           # matches the settings (leaving is
+#                                           # silent unless a device changed)
 #   ./wifi-loc-detect.sh --print-mac <ip>   # helper: show the MAC for an IP,
 #                                           # to fill in the config file
 #

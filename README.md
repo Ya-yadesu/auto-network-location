@@ -143,8 +143,9 @@ as `LOCATION_n_TARGET_IP` / `_TARGET_MAC`; otherwise the two roles collapse into
 one and the second check never fires.
 
 When no group matches, the script falls back to the default location, which is
-`Automatic` (override with the `WLC_DEFAULT` environment variable) — but only
-after the characteristic device has been missing for two consecutive checks.
+`Automatic` (override with the `WLC_DEFAULT` environment variable), as soon as
+the characteristic device stops answering. It then looks once more 15 seconds
+later, inside the same run, and switches back if that was a single bad reading.
 
 ### 3. Try it
 
@@ -158,8 +159,9 @@ after the characteristic device has been missing for two consecutive checks.
 ```
 ./wifi-loc-detect.sh                    dry run, prints what it decided and why
 ./wifi-loc-detect.sh --apply            actually switch locations
-./wifi-loc-detect.sh --apply --notify   also notify: once when this network no
-                                        longer matches, and once per departure
+./wifi-loc-detect.sh --apply --notify   also notify when this network no
+                                        longer matches the settings (leaving is
+                                        silent, unless a device was replaced)
 ./wifi-loc-detect.sh --print-mac <ip>   print the MAC for an IP (config helper)
 ```
 
@@ -244,12 +246,6 @@ one unless you run that by hand.
   usable on the default location and this happens on every departure. Only a
   device that was replaced, or a location whose target device is gone, is worth
   a notice.
-- Both devices must match address *and* MAC. A characteristic device that is
-  powered off, or whose address has been taken over by something else, makes its
-  network unidentifiable.
-- Only one characteristic device and one target device per network; a collision
-  needs a different device or a future multi-condition rule.
-- IPv6 state is per location and must be set per location; it is not inferred.
 - Both devices must match address *and* MAC. A characteristic device that is
   powered off, or whose address has been taken over by something else, makes its
   network unidentifiable.

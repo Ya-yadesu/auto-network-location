@@ -1,6 +1,6 @@
 # 决策模型更正 实施计划（目标设备 + 回落）
 
-**状态：执行中**——Task 1 与 Task 2 已完成并验证；Task 3（文档）进行中；Task 4（线上配置与真实端到端）待使用者配合。
+**状态：已完成**——Task 1–3 已实现并验证；Task 4 的线上配置与真实端到端也已跑通（2026-09-16），结果记在 `AGENTS.md` 第 6 节。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -826,6 +826,8 @@ current state now say which state they describe."
 ```sh
 ./wifi-loc-detect.sh --print-mac <使用者给出的地址>
 ```
+
+**注意输出是「地址␣␣MAC」两个字段**，不是单独的 MAC——写成配置时要取第二个字段（`| awk '{print $2}'`），否则会把地址也塞进 `_TARGET_MAC` 让整组被跳过。2026-09-16 实施时正是这么踩了一次，而且当时那条命令在写入被沙箱拒绝后仍然打印了「写入完成」（`cat` 失败但后面的 `echo` 照跑）——**写入后必须在同一条命令里校验**。
 
 - [ ] **Step 2: 写入线上配置（需要提权）**
 

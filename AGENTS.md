@@ -49,6 +49,7 @@ docs/                                     设计与实施文档（中文）
 - 目标不存在时，条目会以 `(incomplete)` 出现——判断时必须把它当作「不在场」，不能当成 MAC。
 - 邻居表条目会老化失效；脚本因此带重试（默认 4 次 × 1 秒）。
 - **换网后旧条目不会残留**（2026-09-16 实测）：Wi-Fi 从家里换到手机热点、位置仍停在 `Home` 时，脚本对特征设备读到的是 `no answer`（4 次重试约 7 秒），**没有**读到换网前的缓存。彻底关掉 Wi-Fi（`en0` status `inactive`、无 IP）时同样读到 `no answer`，行为一致。这是「离家」判定成立的前提——`probe_device` 在条目已存在时直接读缓存、不重新发包。若将来在别的 macOS 版本上观察到相反行为，必须改成无条件先发包再判定。
+- **切换位置会清空邻居表**（2026-09-16 实测）：`scselect` 切完之后，特征设备的条目会消失（接口在重配），所以「刚切完设备显示不在场」是**正常现象**，不是设备离线。探测器在条目缺失时会自己发包重建（`trigger_arp`），因此不需要额外处理；但任何「一次探测就下结论」的改动都会因此误判。
 - `arp -n` 的输出格式：`? (192.0.2.1) at 00:00:5e:00:53:01 on en0 ifscope [ethernet]`。示例值取自留白段：MAC 用 RFC 7042 的 `00:00:5e:00:53:00/24`，IP 用 RFC 5737 的 `192.0.2.0/24`，不要换成真机值。
 
 ## 5. 环境与工具陷阱（都已实际踩过）
@@ -62,6 +63,17 @@ docs/                                     设计与实施文档（中文）
 - **`networksetup` 的改动只作用于「当前位置」**；两个位置可以同时存在叫 `Wi-Fi` 的服务，靠先 `scselect` 切过去消除歧义。
 - **`networksetup -setv6off` 后**，`preferences.plist` 里的 `IPv6` 会带 `__INACTIVE__: True`，而不是变成 `Off`；以 `networksetup -getinfo` 显示 `IPv6: Off` 为准。
 - **受限沙箱内 `ping`/`nc`/`traceroute`/`curl` 的连通性结论不可信**（`traceroute` 直接 `Operation not permitted`，同一沙箱内 ping 结果自相矛盾）。可信的是 `networksetup`、`scselect`、`route`、`scutil`、`arp`、以及 `preferences.plist`。连通性必须在真实终端核验。
+
+### launchd（第 2 阶段新增，都已实际踩过）
+
+- **两个触发键都不可靠。** `man launchd.plist` 对 `WatchPaths` 写着「highly discouraged …… entirely possible for modifications to be missed」，对 `StartInterval` 写着睡眠期间错过的那次是**直接跳过**、不是延后补发。所以兜底不覆盖睡眠。本机唤醒后的实际行为**尚未实测**（见第 6 节的待办）。
+- **`ThrottleInterval` 是延后补跑，不是丢弃**（2026-09-16 实测）：落在窗口内的事件被推迟约 48–50 秒后**仍然执行了**。所以它既是限速也是延迟——调大能降频，代价是「你刚回到家」那一次也可能被推迟同样久。**测这类行为时观察窗口必须长于 `ThrottleInterval`**，否则会把「被推迟」误读成「没反应」：第一版验证配方用 45 秒窗口 + 70 秒间隔，三轮里误判了两轮。
+- **实际触发频率可能远高于预期。** 本机实测 `StartInterval` 是 300 秒，而运行节奏稳定为**每 60 秒一次**（连续 11 轮无一例外），即由持续到来的 `WatchPaths` 事件被 `ThrottleInterval` 压成 1/分钟。
+- **`scselect` 的改动会立即触发一轮**，这是「进入方向」得以自动化的原因，也是自触发的来源（见设计文档第 5 节）。
+- **受限沙箱里 `launchctl bootstrap` 必须提权**：不提权返回 `Bootstrap failed: 5: Input/output error`（**没有**沙箱标记），而且这个 `rc=5` 极易被 `2>/dev/null` 吞掉——2026-09-16 因此白等 88 秒，误以为 agent 已在跑。**装载后必须用 `launchctl print gui/$(id -u)/<label>` 校验**，不要相信「命令没报错」。
+- **改 plist 后必须 `bootout` 再 `bootstrap`**，launchd 不会自动重读；仓库移动后 plist 里的绝对路径失效，必须重装。
+- **`launchctl` 的 `load`/`unload` 已被它自己标为待替代**，用 `bootstrap`/`bootout`。另外 `kickstart -k` 会给正在运行的实例发 SIGTERM（`print` 里留下 `last terminating signal = Terminated: 15`），调试用不带 `-k` 的形式。
+- **plist 里的 `Umask` 必须写成字符串**（如 `"077"`）：属性列表的整数按十进制解释，写成整数 `77` 会得到八进制 115。但它**管不到 launchd 替你创建的 `StandardOutPath`**——实测字符串写法下 `state` 是 `-rw-------` 而 `agent.log` 是 `-rw-r--r--`。日志要 600 只能在安装时预置（见 README）。
 
 ## 6. 验证方式
 
@@ -89,18 +101,92 @@ WLC_CONFIG=/tmp/t-bad.env ./wifi-loc-detect.sh
 
 已覆盖的用例（2026-09-16 全部通过）：MAC 匹配且已在目标位置、MAC 身份不符、多条目先命中、命中但位置不同（干跑提示不执行）、非法 IP / 不完整组被跳过、位置名含空格与非 ASCII、同一 MAC 的补零与非补零写法等价（`norm_mac`）、`--print-mac`、`--help`、配置缺失（退出码 3）、参数缺失（退出码 2）。
 
-**已验证**：
-- `--apply` 的进入方向（2026-09-16 实测）：先 `scselect Automatic`（DHCP），脚本探到特征设备、识别为 `Home`，`--apply` 真实调用 `scselect` 切到 `Home`，位置回到该有的静态 IPv4 + 指定网关/DNS、IPv6 Off，退出码 0。
-- 「离家」判定（2026-09-16 实测，真实终端、真实断网）：位置停在 `Home` 的情况下把 Wi-Fi 换到手机热点，脚本读到 `no answer`、走 `NOTIFY` 分支、**不切换**，退出码 0；桌面通知真实弹出，文案不含地址与 MAC；邻居表无残留旧条目（见第 4 节）。
-- 彻底关掉 Wi-Fi（2026-09-16 实测）：`en0` 变 `inactive`、无 IP，位置仍停在 `Home`，脚本同样读到 `no answer`、只通知不切换，退出码 0；Wi-Fi 打开后特征设备重新出现并被识别为 `Home`。
+**通知状态机的验证配方**（2026-09-16 实测 11 条断言全通过）。关键技巧是**桩 `osascript`**：把它放进临时 `PATH`，就能精确数出「通知真的发了几次」，而且不会弹出任何通知。
 
-**尚未验证**：
-- 「动作自动触发」本身。目前没有 LaunchAgent（见第 7 节），只能手动运行脚本来验证**判定逻辑**，事件驱动那一层尚未存在。
+```sh
+#!/bin/bash
+# V2: the notification transition state machine.
+set -u
+cd __REPO__ || exit 1
+T=$(mktemp -d); STUB="$T/bin"; mkdir -p "$STUB"
+cat > "$STUB/osascript" <<'STUBEOF'
+#!/bin/sh
+echo called >> "$WLC_NOTIFY_LOG"
+STUBEOF
+chmod +x "$STUB/osascript"
+
+# a live device for the "matched" case, an unroutable address for "away"
+IP=$(arp -an | sed -n 's/^? (\([0-9.]*\)) at \([0-9a-fA-F:]*\) on [a-z0-9]* .*/\1 \2/p' \
+     | grep -vE '^(224|239)\.| ff:ff:ff:ff:ff:ff' | head -1 | awk '{print $1}')
+MAC=$(arp -n "$IP" | sed -n 's/.* at \([0-9a-fA-F:]*\) on .*/\1/p')
+printf 'LOCATION_1_NAME="Home"\nLOCATION_1_IP="%s"\nLOCATION_1_MAC="%s"\n' "$IP" "$MAC" > "$T/here.env"
+printf 'LOCATION_1_NAME="Home"\nLOCATION_1_IP="203.0.113.7"\nLOCATION_1_MAC="de:ad:be:ef:00:01"\n' > "$T/away.env"
+
+export WLC_STATE="$T/state" WLC_NOTIFY_LOG="$T/notify.log"
+: > "$WLC_NOTIFY_LOG"
+pass=0; fail=0
+check_eq()  { if [ "$2" = "$3" ]; then pass=$((pass+1)); echo "PASS  $1";
+              else fail=$((fail+1)); echo "FAIL  $1 (want [$2], got [$3])"; fi; }
+check_has() { if grep -q "$3" "$2" 2>/dev/null; then pass=$((pass+1)); echo "PASS  $1";
+              else fail=$((fail+1)); echo "FAIL  $1 (no /$3/ in $2)"; fi; }
+count()     { wc -l < "$WLC_NOTIFY_LOG" | tr -d ' '; }
+runs() { WLC_CONFIG="$T/$1.env" WLC_DEFAULT=Nowhere PATH="$STUB:$PATH" \
+         ./wifi-loc-detect.sh --apply --notify > "$T/out.$2" 2>&1; }
+
+runs away 1
+check_eq  "1st away notifies"                 1 "$(count)"
+check_eq  "1st away records state=away"       away "$(cat "$WLC_STATE" 2>/dev/null)"
+runs away 2
+check_eq  "2nd away does not notify"          1 "$(count)"
+check_has "2nd away logs the suppression"     "$T/out.2" 'away already reported'
+
+runs here 3
+check_eq  "matching network resets state=ok"  ok "$(cat "$WLC_STATE" 2>/dev/null)"
+
+# A manual run (no --notify) must not swallow the notice the agent would send.
+: > "$WLC_NOTIFY_LOG"; rm -f "$WLC_STATE"
+WLC_CONFIG="$T/away.env" WLC_DEFAULT=Nowhere PATH="$STUB:$PATH" \
+  ./wifi-loc-detect.sh --apply > "$T/out.4" 2>&1
+check_eq  "manual away does not notify"       0 "$(count)"
+check_eq  "manual away leaves state unset"    "" "$(cat "$WLC_STATE" 2>/dev/null)"
+runs away 5
+check_eq  "agent notifies after a manual run" 1 "$(count)"
+
+# A failed delivery must not be recorded as delivered, or the notice is lost.
+BADSTUB="$T/badbin"; mkdir -p "$BADSTUB"
+printf '#!/bin/sh\nexit 1\n' > "$BADSTUB/osascript"; chmod +x "$BADSTUB/osascript"
+: > "$WLC_NOTIFY_LOG"; rm -f "$WLC_STATE"
+WLC_CONFIG="$T/away.env" WLC_DEFAULT=Nowhere PATH="$BADSTUB:$PATH" \
+  ./wifi-loc-detect.sh --apply --notify > "$T/out.6" 2>&1
+check_eq  "failed delivery leaves state unset" "" "$(cat "$WLC_STATE" 2>/dev/null)"
+check_has "failed delivery is logged"          "$T/out.6" 'notification failed'
+runs away 7
+check_eq  "a later successful run notifies"    1 "$(count)"
+
+rm -rf "$T"
+echo "=== $pass passed, $fail failed ==="
+```
+
+**已验证**：
+
+- 判定逻辑（脚本层，2026-09-16 实测）：`--apply` 的进入方向真实切换成功；离家判定只通知不切换；彻底关掉 Wi-Fi 同样只通知不切换；通知文案不含地址与 MAC。
+- 通知状态机：上面那份配方 11 条断言全通过。
+- **触发层（LaunchAgent，2026-09-16 全部无人干预）**：
+  - 进入方向：`RunAtLoad` 那一轮读到 `current location: 'Automatic'`、探到特征设备后 **1 秒**内自己切到 `Home`；另一轮 **6 秒**。
+  - 事件驱动：`scselect` 改动 `SystemConfiguration` 即触发一轮。
+  - **离家去重**：在手机热点上待约 2 分钟，agent 自己发现设备不可达、**只弹一次**通知、不切换，`state` 写 `away`；60 秒后那一轮打印 `away already reported, not notifying again`，不再打扰。
+  - 回到已知网络后 `state` 自动回到 `ok`。
+  - 幂等与自触发收敛：切换自己引发的那一轮读 `already in 'Home'`、位置不变，没有失控。
+
+**尚未验证 / 待查**：
+
+- **唤醒后的行为**。需要一次真实睡眠。`man launchd.plist` 说 `StartInterval` 在睡眠期间错过的那次是**直接跳过**，所以这一条只能实测。
+- **`10:49:38` 那次连续 8 秒 `no answer`**（当时使用者确认在家里网络上）。未复现；复发时按 `docs/2026-09-16-launchagent-design.md` 第 7 节取证，**不要凭推理改探测逻辑**。
 
 ## 7. 路线图
 
 1. 探测器（本脚本）：只判断，`--apply` 才切换。**已完成**
-2. 事件驱动常驻：LaunchAgent + `WatchPaths` 监视 `/Library/Preferences/SystemConfiguration/`；**必须处理自触发**（切换会改写该目录）。
+2. 事件驱动常驻：LaunchAgent + `WatchPaths` 监视 `/Library/Preferences/SystemConfiguration/`；自触发靠幂等收敛（实测无失控）。**已完成**——注意实测节奏是每 60 秒一轮（见第 5 节），不是每 5 分钟。
 3. 菜单栏：显示当前位置并可点击切换（macOS 已移除位置 UI，`networksetup -listlocations` 之外没有图形入口）。
 
 ## 8. 隐私

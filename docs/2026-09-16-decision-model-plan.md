@@ -1,6 +1,6 @@
 # 决策模型更正 实施计划（目标设备 + 回落）
 
-**状态：已完成**——Task 1–3 已实现并验证；Task 4 的线上配置与真实端到端也已跑通（2026-09-16），结果记在 `AGENTS.md` 第 6 节。
+**状态：已完成，随后经过一次设计变更**——Task 1–4 已实现、验证并上线（2026-09-16），结果记在 `AGENTS.md` 第 6 节。**当晚使用者的复核推翻了其中两处**：跨轮安全阀改成「立即回落 + 轮内复探 15 秒」、去掉 `StartInterval`、回落不再通知。所以**本文档 Task 2 里内联的代码与配方是变更前的版本**；变更后的权威描述见 `docs/2026-09-16-decision-model-design.md` 的 §5/§7/§8/§11.2/§12。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

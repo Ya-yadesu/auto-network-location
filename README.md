@@ -56,12 +56,12 @@ network is this"; the optional *target* device answers "is this still the networ
 my settings were written for". The target defaults to the characteristic device,
 so a network that needs no separate check needs no extra configuration.
 
-Leaving is detected when the characteristic device stays gone for **two
-consecutive checks**, and the Mac is returned to the default location
-(`Automatic`, unless `WLC_DEFAULT` says otherwise) so that it works on whatever
-network it is actually on. Two checks rather than one, because switching a
-location flushes the neighbour table and can look like a departure for a single
-check.
+Leaving is assumed as soon as the characteristic device stops answering, and the
+Mac is returned to the default location (`Automatic`, unless `WLC_DEFAULT` says
+otherwise) so that it works on whatever network it is actually on. The default
+location is DHCP, which is usable almost anywhere, so acting at once is cheap: if
+it turns out to have been a single bad reading, the same run looks again after 15
+seconds and switches back, silently.
 
 A network that is still there but no longer matches — the device your settings
 depend on is gone, or the address now belongs to something else — is a different
@@ -195,11 +195,12 @@ launchctl bootout gui/$(id -u)/com.yayadesu.auto-network-location
 rm ~/Library/LaunchAgents/com.yayadesu.auto-network-location.plist
 ```
 
-The job watches `/Library/Preferences/SystemConfiguration` and also runs every
-300 seconds as a safety net. It enters a known network when it appears, returns
-to the default location once the characteristic device has been gone for two
-consecutive checks, and notifies when the network it is on no longer matches the
-configured settings — once per state, not once per trigger.
+The job watches `/Library/Preferences/SystemConfiguration` and also runs once
+when it is loaded. It enters a known network when it appears, falls back to the
+default location when the characteristic device stops answering (looking once
+more after 15 seconds in case that was a single bad reading), and notifies when
+the network it is on no longer matches the configured settings — once per state,
+not once per trigger.
 
 Two prerequisites and two caveats:
 
@@ -209,28 +210,46 @@ Two prerequisites and two caveats:
   must reinstall; edit the plist and you must `bootout` then `bootstrap`
   again, because launchd does not re-read it.
 - `WatchPaths` can miss events (`man launchd.plist` says it is "highly
-  discouraged"), and the 300-second fallback does not fire while the system
-  is asleep. Expect the switch to happen on the next event or within five
-  minutes of waking.
+  discouraged"), and this job deliberately has no periodic fallback: it is a
+  one-shot script for a specific event, not a poller. A missed event therefore
+  leaves the location wrong until the next network change, which is why the
+  manual command below matters.
 - The log file grows without bound and is safe to delete; the state file that
   records what has already been reported is separate.
+
+### If it gets it wrong
+
+macOS no longer exposes any location UI, so switching by hand is one command:
+
+```sh
+networksetup -listlocations     # the locations that exist, and the current one
+scselect                        # the same, more briefly
+scselect Home                   # switch to a location
+```
+
+Because the job only runs on a network change, a wrong guess stays until the next
+one unless you run that by hand.
 
 ## Known limitations
 
 - **Automatic operation is verified.** With the LaunchAgent loaded, the location
   is switched unattended when a known network is entered, and the machine is
   returned to the default location after leaving one. Waking from sleep was
-  measured: a run happens about thirty seconds after the lid opens, and the
-  300-second fallback bounds the worst case at five minutes. `WatchPaths` is
-  race-prone, so a missed event is caught by that fallback rather than
-  immediately.
-- **Leaving takes two consecutive checks to confirm**, so the fallback can come
-  one check after the departure: about 60 seconds while the network is busy, up
-  to a 5-minute `StartInterval` when nothing else is happening.
-- **The notice that the machine was returned to the default location is not
-  retried** if delivery fails: the location has already changed and there is
-  nowhere reliable to remember an unsent notice. The "network no longer matches"
-  notice does retry — it is only recorded once it has been delivered.
+  measured: a run happens about thirty seconds after the lid opens, because
+  reconnecting raises a `WatchPaths` event.
+- **Leaving is confirmed inside the same run**, 15 seconds after the fallback, so
+  a single bad reading costs two quick interface reconfigurations instead of a
+  wrong location. Nothing is reported when that happens.
+- **Nothing is reported when you leave**, on purpose: the machine is already
+  usable on the default location and this happens on every departure. Only a
+  device that was replaced, or a location whose target device is gone, is worth
+  a notice.
+- Both devices must match address *and* MAC. A characteristic device that is
+  powered off, or whose address has been taken over by something else, makes its
+  network unidentifiable.
+- Only one characteristic device and one target device per network; a collision
+  needs a different device or a future multi-condition rule.
+- IPv6 state is per location and must be set per location; it is not inferred.
 - Both devices must match address *and* MAC. A characteristic device that is
   powered off, or whose address has been taken over by something else, makes its
   network unidentifiable.

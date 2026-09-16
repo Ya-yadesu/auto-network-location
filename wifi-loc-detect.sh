@@ -35,7 +35,7 @@
 # Usage:
 #   ./wifi-loc-detect.sh                    # dry run: print the decision only
 #   ./wifi-loc-detect.sh --apply            # actually run scselect
-#   ./wifi-loc-detect.sh --apply --notify   # also notify when the network
+#   ./wifi-loc-detect.sh --apply --notify   # notify once when the network
 #                                           # cannot be identified
 #   ./wifi-loc-detect.sh --print-mac <ip>   # helper: show the MAC for an IP,
 #                                           # to fill in the config file
@@ -47,6 +47,7 @@ DEFAULT_LOCATION="${WLC_DEFAULT:-Automatic}"
 ATTEMPTS=4          # probe attempts before giving up
 RETRY_DELAY=1       # seconds between attempts (settling time after a change)
 PROBE_PORT=33445    # UDP port used only to force an ARP lookup
+STATE="${WLC_STATE:-$HOME/.wifi-loc-control/state}"
 APPLY=0
 NOTIFY=0
 
@@ -184,13 +185,35 @@ load_config() {
   [[ ${#LOC_NAMES[@]} -gt 0 ]]
 }
 
+# The state file records whether the user has already been told that the
+# current network cannot be identified, so a repeatedly triggered agent does
+# not repeat the notice. Only the literal value "away" counts: a missing,
+# empty or unknown value reads as "not told yet", so the failure direction is
+# one notice too many rather than one silently swallowed.
+# See docs/2026-09-16-launchagent-design.md.
+read_state() {
+  [[ -f "$STATE" ]] || return 0
+  head -n 1 "$STATE" 2>/dev/null
+}
+
+write_state() {
+  printf '%s\n' "$1" > "$STATE" 2>/dev/null || log "could not write state file: $STATE"
+}
+
+# Print the notice to the log and, with --notify, deliver it. Returning
+# non-zero for a failed delivery lets the caller avoid recording a notice the
+# user never received, so the next trigger tries again.
 notify() {
   local message="$1"
   log "NOTIFY: $message"
   if [[ "$NOTIFY" == 1 ]]; then
-    osascript -e "display notification \"$message\" with title \"auto-network-location\"" \
-      >/dev/null 2>&1 || log "notification failed"
+    if ! osascript -e "display notification \"$message\" with title \"auto-network-location\"" \
+         >/dev/null 2>&1; then
+      log "notification failed"
+      return 1
+    fi
   fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -251,6 +274,7 @@ while [[ $idx -lt ${#LOC_NAMES[@]} ]]; do
 done
 
 if [[ -n "$matched_location" ]]; then
+  write_state ok
   if [[ "$matched_location" == "$current" ]]; then
     log "already in '$matched_location', nothing to do"
     exit 0
@@ -271,13 +295,28 @@ fi
 
 # No characteristic device answered.
 if [[ "$current" == "$DEFAULT_LOCATION" ]]; then
+  write_state ok
   log "no characteristic device found; already in '$DEFAULT_LOCATION', nothing to do"
   exit 0
 fi
 
+# No characteristic device answered and the current location is not the
+# default one: the user is away from every network we know about. Say so
+# once per departure.
 if [[ "$identity_mismatch" == 1 ]]; then
-  notify "A configured address answered with an unexpected MAC. Check the network settings."
+  away_message="A configured address answered with an unexpected MAC. Check the network settings."
 else
-  notify "Cannot identify the current network; the network settings may not match this environment."
+  away_message="Cannot identify the current network; the network settings may not match this environment."
+fi
+
+if [[ "$NOTIFY" == 1 && "$(read_state)" == "away" ]]; then
+  log "away already reported, not notifying again"
+else
+  if notify "$away_message"; then
+    # Remember it only when the user was actually told: a manual run without
+    # --notify must not swallow the notice the agent would send later, and a
+    # failed delivery must be retried rather than recorded as delivered.
+    [[ "$NOTIFY" == 1 ]] && write_state away
+  fi
 fi
 exit 0

@@ -240,8 +240,9 @@ one unless you run that by hand.
 
 - **Automatic operation is verified.** With the LaunchAgent loaded, the location
   is switched unattended when a known network is entered, and the machine is
-  returned to the default location after leaving one. Waking from sleep was
-  measured: a run happens about thirty seconds after the lid opens, because
+  returned to the default location after leaving one — measured at about two
+  seconds from the network change, and silently. Waking from sleep was measured
+  too: a run happens about thirty seconds after the lid opens, because
   reconnecting raises a `WatchPaths` event.
 - **Leaving is decided on the first pass**, about a second in, and confirmed
   inside the same run: the rest of the probe budget and a look 15 seconds later

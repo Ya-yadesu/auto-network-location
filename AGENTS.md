@@ -107,7 +107,7 @@ WLC_CONFIG=/tmp/t-bad.env ./wifi-loc-detect.sh
 #!/bin/bash
 # V2: the notification transition state machine.
 set -u
-cd __REPO__ || exit 1
+cd "$(git rev-parse --show-toplevel)" || exit 1
 T=$(mktemp -d); STUB="$T/bin"; mkdir -p "$STUB"
 cat > "$STUB/osascript" <<'STUBEOF'
 #!/bin/sh
@@ -193,3 +193,4 @@ echo "=== $pass passed, $fail failed ==="
 
 - 配置文件里的 IP/MAC 属于本机网络信息，**不要提交进仓库、不要粘进 issue**。仓库内文档、代码注释与**提交信息**里的示例值只用留白值：MAC 用 RFC 7042 的 `00:00:5e:00:53:xx`，IP 用 RFC 5737 的 `192.0.2.0/24`、`198.51.100.0/24`、`203.0.113.0/24`，不要用真机值。（提交信息也进历史，删工作区是删不掉的。）
 - 通知文案**不得包含 SSID、特征设备 MAC 或其特征地址**——通知会进通知中心、可能随 iCloud 同步，所以文案里不放任何定位信息，只留「地址与配置不符」这个结论。地址与 MAC 的具体值**只写本地日志**（`log`，即脚本 stdout）。
+- **仓库里不放个人绝对路径**（`/Users/<你>`）。launchd 需要字面路径，所以 `com.yayadesu.auto-network-location.plist` 用 `__REPO__` / `__HOME__` 占位、安装时用 `sed` 替换（见 README）；脚本、配方与文档里改用 `$(git rev-parse --show-toplevel)` 或 `$HOME`。提交身份同理：本仓库的 `user.email` 用 GitHub 的 noreply 地址。

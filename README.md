@@ -151,10 +151,16 @@ not have to run the script yourself:
 
 ```sh
 touch ~/.wifi-loc-control/agent.log && chmod 600 ~/.wifi-loc-control/agent.log
-cp com.yayadesu.auto-network-location.plist ~/Library/LaunchAgents/
+sed "s|__REPO__|$PWD|; s|__HOME__|$HOME|" com.yayadesu.auto-network-location.plist \
+  > ~/Library/LaunchAgents/com.yayadesu.auto-network-location.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.yayadesu.auto-network-location.plist
 launchctl print gui/$(id -u)/com.yayadesu.auto-network-location
 ```
+
+Run that from the root of this checkout: the plist ships with two placeholders
+(`__REPO__` for the checkout path, `__HOME__` for your home directory) because
+launchd expands neither `~` nor environment variables, so those paths must be
+literal by the time launchd reads the file.
 
 The first line pre-creates the log with mode 600. launchd creates the
 `StandardOutPath` file itself and the plist's `Umask` key does not apply to it,

@@ -52,7 +52,7 @@
 #!/bin/bash
 # V2 from the spec: the notification transition state machine.
 set -u
-cd __REPO__ || exit 1
+cd $(git rev-parse --show-toplevel) || exit 1
 T=$(mktemp -d); STUB="$T/bin"; mkdir -p "$STUB"
 cat > "$STUB/osascript" <<'STUBEOF'
 #!/bin/sh
@@ -234,7 +234,7 @@ Expected: `bash -n` 静默通过；状态机 **11 passed, 0 failed**。注意离
 Run:
 
 ```sh
-cd __REPO__
+cd $(git rev-parse --show-toplevel)
 T=$(mktemp -d); IP=203.0.113.7
 S=$(mktemp -d)
 IPL=$(arp -an | sed -n 's/^? (\([0-9.]*\)) at \([0-9a-fA-F:]*\) on [a-z0-9]* .*/\1 \2/p' | grep -vE '^(224|239)\.' | head -1 | awk '{print $1}')
@@ -683,7 +683,7 @@ assumed."
 
 - [ ] **Step 6: 最终核对**
 
-Run: `cd __REPO__ && git status --short --branch && git log --oneline -6 && bash -n wifi-loc-detect.sh && plutil -lint com.yayadesu.auto-network-location.plist`
+Run: `cd $(git rev-parse --show-toplevel) && git status --short --branch && git log --oneline -6 && bash -n wifi-loc-detect.sh && plutil -lint com.yayadesu.auto-network-location.plist`
 Expected: 工作区干净；`bash -n` 静默；plist `OK`。
 
 ---

@@ -71,7 +71,7 @@
 
 Label：`com.yayadesu.auto-network-location`
 
-下文 `<repo>` 指 `__REPO__`。plist 里必须是这个字面绝对路径——launchd 不展开 `~`，也不做任何路径推导，所以仓库一移动就得重装（第 8 节）。
+下文 `<repo>` 指本仓库检出的绝对路径。plist 里必须是这个字面绝对路径——launchd 不展开 `~`，也不做任何路径推导，所以仓库一移动就得重装（第 8 节）。仓库里那份 plist 用 `__REPO__` 与 `__HOME__` 两个占位符，安装时用一条 `sed` 替换成实值（见 README）。
 
 | 键 | 值 | 说明 |
 |---|---|---|

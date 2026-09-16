@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
+<!--
+  Two placeholders must be substituted before installing (see README):
+    __REPO__  absolute path to this checkout
+    __HOME__  your home directory
+  launchd expands neither ~ nor environment variables in these paths, so they
+  have to be literal by the time launchd reads this file.
+-->
 <dict>
 	<key>Label</key>
 	<string>com.yayadesu.auto-network-location</string>

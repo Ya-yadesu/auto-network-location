@@ -2,11 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <!--
-  Two placeholders must be substituted before installing (see README):
-    __REPO__  absolute path to this checkout
-    __HOME__  your home directory
-  launchd expands neither ~ nor environment variables in these paths, so they
-  have to be literal by the time launchd reads this file.
+  安装前必须替换两个占位符（见 README）：
+    __REPO__  本仓库的绝对路径
+    __HOME__  你的家目录
+  launchd 不会在这些路径里展开 ~ 或环境变量，所以它读到这个文件时必须是字面路径。
 -->
 <dict>
 	<key>Label</key>
@@ -20,10 +19,9 @@
 		<string>--notify</string>
 	</array>
 
-	<!-- Run on every network change. There is deliberately no StartInterval:
-	     this is a one-shot script for a specific event, not a poller. If a
-	     WatchPaths event is ever missed the location stays wrong until the next
-	     network change, so the README documents the manual scselect commands. -->
+	<!-- 每次网络变化都跑。这里故意没有 StartInterval：这是一个针对特定事件的一次性
+	     脚本，不是轮询器。万一漏掉一次 WatchPaths 事件，位置会一直停在错的那个，直到
+	     下一次网络变化，所以 README 里写了手动 scselect 的命令。 -->
 	<key>WatchPaths</key>
 	<array>
 		<string>/Library/Preferences/SystemConfiguration</string>
@@ -38,12 +36,12 @@
 	<key>ProcessType</key>
 	<string>Background</string>
 
-	<!-- So osascript notifications land in the GUI session. -->
+	<!-- 让 osascript 的通知落进 GUI 会话。 -->
 	<key>LimitLoadToSessionType</key>
 	<string>Aqua</string>
 
-	<!-- A string, not an integer: launchd reads plist integers as decimal, so
-	     the leading zero is the only way to express octal 077 here. -->
+	<!-- 是字符串而不是整数：launchd 把属性列表的整数按十进制读，所以八进制 077 只能靠
+	     这个前导零表达。 -->
 	<key>Umask</key>
 	<string>077</string>
 

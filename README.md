@@ -91,15 +91,17 @@ mkdir -p ~/.wifi-loc-control
 `~/.wifi-loc-control/locations.env` —— **每张网络一个编号组**：
 
 ```sh
-# the macOS location to switch to, the device address, and the device MAC
+# 语言：只影响 --help 文本与通知正文；日志与状态文件固定英文。
+# 只认 zh_CN（默认）与 en，也可以用环境变量 WLC_LANG 临时覆盖。
+SCRIPT_LANG="zh_CN"
+
+# 要切换过去的 macOS 位置名、设备地址、设备 MAC
 LOCATION_1_NAME="Home"
 LOCATION_1_IP="192.0.2.1"
 LOCATION_1_MAC="00:00:5e:00:53:01"
 
-# Optional: the device this location's own settings depend on (its gateway or
-# DNS). Omit it and the characteristic device above is used. If you give one,
-# give it in full: a malformed target skips the whole group rather than being
-# silently ignored.
+# 可选：本位置的设置所依赖的那台设备（它的网关或 DNS）。不写就用上面那台特征设备。
+# 要写就写全：目标字段不合法会跳过整组，而不是被静默忽略。
 # LOCATION_1_TARGET_IP="192.0.2.100"
 # LOCATION_1_TARGET_MAC="00:00:5e:00:53:02"
 
@@ -107,6 +109,12 @@ LOCATION_1_MAC="00:00:5e:00:53:01"
 # LOCATION_2_IP="198.51.100.1"
 # LOCATION_2_MAC="aa:bb:cc:dd:ee:ff"
 ```
+
+`SCRIPT_LANG` 是一个**全局**字段，不属于任何编号组，决定 `--help` 与**通知正文**的语言；
+默认简体中文，改成 `"en"` 就是英文（也可以用环境变量 `WLC_LANG` 临时覆盖）。只认这两个
+值、大小写不敏感；写成别的（例如 `zh-CN`）会回落到 `zh_CN`，并在日志里留一行说明——
+语言写错不影响判定与切换。**日志与状态文件固定英文**：它们要被 `grep`，状态值本身也有
+含义。
 
 加一张网络就复制一组、把编号加一。位置名是**变量值**而不是变量名，所以可以含空格
 与非 ASCII 字符（`LOCATION_1_NAME="My Home"` 没问题）。

@@ -20,10 +20,11 @@
 #   * Both directions are automatic, but only leaving is unconditional:
 #       - the characteristic device is present -> enter that location;
 #       - it is gone, or the address now belongs to another device -> fall back
-#         to the default location at once, so the machine works on whatever
-#         network it is on, then look once more inside the same run after 15
-#         seconds: if the device turns up, that was a single bad reading and we
-#         go straight back, silently;
+#         to the default location as soon as the first sweep is over, so the
+#         machine works on whatever network it is on. The rest of the probe
+#         budget still runs, in this same run: if the device answers there, it
+#         was a single bad reading and we go straight back, silently; if it does
+#         not, the run looks once more after a delay and then leaves for good;
 #       - the location matches but its TARGET device is gone -> notify and
 #         leave the settings alone, because the network itself changed and
 #         switching would silently replace them with DHCP.
@@ -131,25 +132,41 @@ arp_lookup() {
   printf '%s\n' "$line" | sed -n 's/.* at \([0-9a-fA-F:]\{11,17\}\) on .*/\1/p'
 }
 
-# Probe one characteristic device.
-#   exit 0 + prints MAC  -> present and MAC matches the configured one
-#   exit 1 + prints MAC  -> present but a different device (identity mismatch)
-#   exit 1 + no output   -> not present
-probe_device() {
-  local ip="$1" want_mac="$2" attempt mac
+# One attempt at one device. Prints the MAC that answered, if any:
+#   exit 0 + prints MAC -> present and MAC matches the configured one
+#   exit 1 + prints MAC -> present but a different device (identity mismatch)
+#   exit 2 + no output  -> nothing in the neighbour table
+# A missing entry is not free: the packet is sent first, because the kernel only
+# resolves on demand, and then the table is read again after RETRY_DELAY. A
+# stale entry and a departed network look exactly the same on the first read,
+# which is why the outgoing packet comes before the verdict.
+probe_once() {
+  local ip="$1" want_mac="$2" mac
   want_mac="$(norm_mac "$want_mac")"
-  for (( attempt = 1; attempt <= ATTEMPTS; attempt++ )); do
+  mac="$(arp_lookup "$ip")"
+  if [[ -z "$mac" ]]; then
+    trigger_arp "$ip"
+    sleep "$RETRY_DELAY"
     mac="$(arp_lookup "$ip")"
-    if [[ -z "$mac" ]]; then
-      trigger_arp "$ip"
-      sleep "$RETRY_DELAY"
-      mac="$(arp_lookup "$ip")"
-    fi
-    if [[ -n "$mac" ]]; then
-      printf '%s\n' "$mac"
-      [[ "$(norm_mac "$mac")" == "$want_mac" ]] && return 0
-      return 1
-    fi
+  fi
+  [[ -z "$mac" ]] && return 2
+  printf '%s\n' "$mac"
+  [[ "$(norm_mac "$mac")" == "$want_mac" ]] && return 0
+  return 1
+}
+
+# Probe one device over the whole attempt budget. Used for the target device,
+# where nothing can be decided before the budget is out: its answer is the
+# difference between "fine" and "notify". The characteristic device is searched
+# sweep by sweep instead (probe_sweep), because there the first miss already
+# means the machine is standing on settings that do not fit.
+probe_device() {
+  local ip="$1" want_mac="$2" attempt rc
+  for (( attempt = 1; attempt <= ATTEMPTS; attempt++ )); do
+    probe_once "$ip" "$want_mac"
+    rc=$?
+    [[ $rc -eq 0 ]] && return 0
+    [[ $rc -eq 1 ]] && return 1
     [[ $attempt -lt $ATTEMPTS ]] && sleep "$RETRY_DELAY"
   done
   return 1
@@ -321,22 +338,27 @@ matched_idx=-1
 matched_desc=""
 feature_state="absent"   # absent | mismatch -- only meaningful when nothing matched
 
-# Probe every rule. Sets matched_* and returns 0 as soon as one matches.
-probe_rules() {
-  local idx=0 loc ip mac seen
+# One sweep: one attempt at every rule. Sets matched_* and returns 0 as soon as
+# a rule matches. feature_state keeps the reason the sweep failed -- "absent" or
+# "mismatch" -- for the log line and for the one notice that depends on it.
+probe_sweep() {
+  local idx=0 loc ip mac seen rc
+  feature_state="absent"
   while [[ $idx -lt ${#LOC_NAMES[@]} ]]; do
     loc="${LOC_NAMES[$idx]}"
     ip="${LOC_IPS[$idx]}"
     mac="${LOC_MACS[$idx]}"
 
     log "probing $ip for '$loc' (expect $mac)"
-    if seen="$(probe_device "$ip" "$mac")"; then
+    seen="$(probe_once "$ip" "$mac")"
+    rc=$?
+    if [[ $rc -eq 0 ]]; then
       log "  found $seen at $ip -> '$loc'"
       matched_location="$loc"
       matched_idx="$idx"
       matched_desc="$ip $seen"
       return 0
-    elif [[ -n "$seen" ]]; then
+    elif [[ $rc -eq 1 ]]; then
       # The address and both MACs stay in this local log line only: nothing
       # identifying goes into a notification (see AGENTS.md, section 8).
       log "  device at $ip has MAC $seen, expected $mac (identity mismatch)"
@@ -349,39 +371,71 @@ probe_rules() {
   return 1
 }
 
-# --- Leaving. Go to the default location first: it is DHCP, so the machine
-# --- works on whatever network it is actually on. A single reading can be a
-# --- transient, so look once more inside this same run -- if the device turns
-# --- up, we never left and we go straight back.
+# --- Leaving. While we are standing in a known location, the first sweep
+# --- without an answer is already enough to fall back: the default location is
+# --- DHCP, so the machine is usable on whatever network it is actually on, and
+# --- waiting out the rest of the budget only prolongs the time spent on
+# --- settings that do not fit. The budget itself is not shortened -- the
+# --- remaining sweeps run right here, in this same run, as the first chance to
+# --- come back -- and one more sweep after CONFIRM_DELAY is the last chance.
 # --- See the design, section 8.
-leave_to_default() {
-  log "not on a known network (feature device $feature_state); falling back to '$DEFAULT_LOCATION'"
-  if [[ "$APPLY" != 1 ]]; then
-    log "dry run: would switch to '$DEFAULT_LOCATION' (use --apply)"
-    exit 0
-  fi
-  if ! scselect "$DEFAULT_LOCATION"; then
-    log "scselect '$DEFAULT_LOCATION' failed"
+switch_back() {
+  log "the device is back after all; switching back to '$matched_location'"
+  if ! scselect "$matched_location"; then
+    log "scselect '$matched_location' failed"
     exit 1
   fi
-  log "switched to '$DEFAULT_LOCATION'"
+  log "switched back to '$matched_location'"
+  current="$matched_location"
+}
 
-  sleep "$CONFIRM_DELAY"
-  matched_location=""
-  matched_idx=-1
-  matched_desc=""
-  feature_state="absent"
-  if probe_rules; then
-    log "the device is back after all; switching back to '$matched_location'"
-    if ! scselect "$matched_location"; then
-      log "scselect '$matched_location' failed"
+fell_back=0
+sweep=1
+while [[ $sweep -le $ATTEMPTS ]]; do
+  if probe_sweep; then
+    # The device answered somewhere in this pass. If we had already fallen back
+    # for it, go straight back; nobody needs to hear about a transient reading.
+    [[ $fell_back -eq 1 ]] && switch_back
+    break
+  fi
+  if [[ $sweep -eq 1 && "$current" != "$DEFAULT_LOCATION" ]]; then
+    log "not on a known network (feature device $feature_state); falling back to '$DEFAULT_LOCATION'"
+    if [[ "$APPLY" != 1 ]]; then
+      log "dry run: would switch to '$DEFAULT_LOCATION' (use --apply)"
+      exit 0
+    fi
+    if ! scselect "$DEFAULT_LOCATION"; then
+      log "scselect '$DEFAULT_LOCATION' failed"
       exit 1
     fi
-    log "switched back to '$matched_location'"
-    current="$matched_location"
-    return 0
+    log "switched to '$DEFAULT_LOCATION'"
+    fell_back=1
+  fi
+  [[ $sweep -lt $ATTEMPTS ]] && sleep "$RETRY_DELAY"
+  sweep=$((sweep + 1))
+done
+
+if [[ -z "$matched_location" ]]; then
+  if [[ "$fell_back" != 1 ]]; then
+    log "not on a known network (feature device $feature_state); already in '$DEFAULT_LOCATION', nothing to do"
+    write_state default
+    exit 0
   fi
 
+  log "feature device $feature_state in $ATTEMPTS sweeps; looking once more in ${CONFIRM_DELAY}s"
+  sleep "$CONFIRM_DELAY"
+  sweep=1
+  while [[ $sweep -le $ATTEMPTS ]]; do
+    if probe_sweep; then
+      switch_back
+      break
+    fi
+    [[ $sweep -lt $ATTEMPTS ]] && sleep "$RETRY_DELAY"
+    sweep=$((sweep + 1))
+  done
+fi
+
+if [[ -z "$matched_location" ]]; then
   # Really gone. Stay quiet: the machine is already usable and this happens on
   # every departure. Only a device that was replaced is worth telling the user.
   log "feature device still $feature_state after ${CONFIRM_DELAY}s; we have left"
@@ -390,17 +444,6 @@ leave_to_default() {
   fi
   write_state default
   exit 0
-}
-
-if ! probe_rules; then
-  if [[ "$current" == "$DEFAULT_LOCATION" ]]; then
-    log "not on a known network (feature device $feature_state); already in '$DEFAULT_LOCATION', nothing to do"
-    write_state default
-    exit 0
-  fi
-  # Either exits (we really left) or returns with matched_* set because the
-  # device came back; in that case fall through to the target check.
-  leave_to_default
 fi
 
 # --- On a known network. The target device answers a second question: is this

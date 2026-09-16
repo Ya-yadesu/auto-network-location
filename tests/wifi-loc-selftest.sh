@@ -7,16 +7,16 @@
 #
 #   osascript  records that it was called instead of delivering a notice
 #   scselect   records its argument instead of changing this Mac's location
-#   arp        only in the two "absent device" suites: the first 8 lookups of
-#              the feature address report nothing, which is exactly one failing
-#              probe_device (4 attempts x 2 lookups)
+#   arp        only in the cases that need the feature address to look absent:
+#              it reports nothing for the first N lookups, N being what one
+#              sweep (2 lookups per rule) or one whole pass (8) costs
 #
 # Suites (WLC_CONFIRM_DELAY is forced to 1 so the 15s in-run confirmation does
 # not dominate the runtime):
 #
 #   config     10 assertions  the target fields: defaults and validation
 #   state      14 assertions  the notice state machine, minus the decision
-#   decision   38 assertions  the decision table: N1-N8, N10-N12   (~2 minutes)
+#   decision   48 assertions  the decision table: N1-N8, N10-N14   (~2 minutes)
 #   reconfirm  13 assertions  N9: the in-run confirmation when the target
 #                             device is a different box. The decision suite
 #                             cannot see this: its target IS the feature
@@ -50,6 +50,47 @@ order() { local a b; a=$(grep -n "$2" "$3" | head -1 | cut -d: -f1)
           b=$(grep -n "$4" "$3" | head -1 | cut -d: -f1)
           if [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]; then pass=$((pass+1)); echo "PASS  $1"
           else fail=$((fail+1)); echo "FAIL  $1 (line $a vs $b)"; fi; }
+lt()    { if [ "$2" -lt "$3" ]; then pass=$((pass+1)); echo "PASS  $1 (${2}s < ${3}s)"
+          else fail=$((fail+1)); echo "FAIL  $1 (${2}s not < ${3}s)"; fi; }
+ge()    { if [ "$2" -ge "$3" ]; then pass=$((pass+1)); echo "PASS  $1 (${2}s >= ${3}s)"
+          else fail=$((fail+1)); echo "FAIL  $1 (${2}s not >= ${3}s)"; fi; }
+le()    { if [ "$2" -le "$3" ]; then pass=$((pass+1)); echo "PASS  $1 (${2}s <= ${3}s)"
+          else fail=$((fail+1)); echo "FAIL  $1 (${2}s not <= ${3}s)"; fi; }
+
+# Seconds between a run's first log line and its fallback line, read from the
+# log's own timestamps. Prints -1 when either line is missing.
+fallback_delay() {
+  awk '
+    function sec(t, a) { split(t, a, ":"); return a[1]*3600 + a[2]*60 + a[3] }
+    /current location:/ { if (!start) start = sec(substr($2, 1, 8)) }
+    /falling back to/   { if (!fin) fin = sec(substr($2, 1, 8)) }
+    END { if (start && fin) print fin - start; else print -1 }
+  ' "$1"
+}
+
+# A stub arp that reports nothing for the first <n> lookups of the feature
+# address and then falls through to the real one. One sweep spends two lookups
+# per rule, so n=2 is exactly one sweep and n=8 is one whole pass. The argument
+# is matched exactly: a substring match would also swallow the target address,
+# which is a different device.
+mk_arp_stub() {
+  local n="$1" dir="$T/arpbin$1"
+  mkdir -p "$dir"
+  cat > "$dir/arp" <<EOF
+#!/bin/sh
+if [ "\$2" = "$FIP" ]; then
+  c="$dir/count"
+  k=\$(cat "\$c" 2>/dev/null || echo 0)
+  if [ "\$k" -lt $n ]; then
+    echo \$((k + 1)) > "\$c"
+    echo "? ($FIP) -- no entry"
+    exit 0
+  fi
+fi
+exec /usr/sbin/arp "\$@"
+EOF
+  chmod +x "$dir/arp"
+}
 
 # A stub bin directory plus the two stubs every suite needs. Echoes the
 # directory it made, so the caller keeps the recipe's short "$T" names.
@@ -210,42 +251,27 @@ STUB
   rm -rf "$T"
 }
 
-# --- decision: the decision table, N1-N8 and N10-N12 -------------------------
+# --- decision: the decision table, N1-N8 and N10-N14 -------------------------
 suite_decision() {
   echo "### decision"
   local T; T=$(mk_stubs); pass=0; fail=0
-  mkdir -p "$T/arpbin"
   export WLC_NOTIFY_LOG="$T/notify.log" WLC_SCSELECT_LOG="$T/ss.log" WLC_STATE="$T/state"
   export WLC_CONFIRM_DELAY=1
   pick_devices
   [ -z "$FIP" ] && { echo "no live neighbour entry to build the fixture from" >&2; return 1; }
 
-  # Opt-in arp stub: the first 8 lookups of the feature address report nothing,
-  # so the first probe round fails and the post-fallback round succeeds. Eight
-  # is exactly what one failing probe_device costs: 4 attempts x 2 lookups.
-  # Match the exact argument: a substring match would also swallow the target.
-  cat > "$T/arpbin/arp" <<EOF
-#!/bin/sh
-if [ "\$2" = "$FIP" ]; then
-  n=\$(cat "$T/arpcount" 2>/dev/null || echo 0)
-  if [ "\$n" -lt 8 ]; then
-    echo \$((n + 1)) > "$T/arpcount"
-    echo "? ($FIP) -- no entry"
-    exit 0
-  fi
-fi
-exec /usr/sbin/arp "\$@"
-EOF
-  chmod +x "$T/arpbin/arp"
+  # Two opt-in stubs: 8 lookups of silence is one whole pass, 2 is one sweep.
+  mk_arp_stub 8
+  mk_arp_stub 2
 
   notify_count() { wc -l < "$WLC_NOTIFY_LOG" 2>/dev/null | tr -d ' '; }
   ss_count()     { grep -c "^$1\$" "$WLC_SCSELECT_LOG" 2>/dev/null | tr -d ' '; }
   st()           { sed -n 's/^state=//p' "$WLC_STATE" 2>/dev/null | head -1; }
-  # $4 = "arp" prepends the stub that makes the first probe round fail.
-  run() { local p="$T/bin:$ORIG_PATH"; [ "${4:-}" = "arp" ] && p="$T/arpbin:$p"
+  # $4 = how many lookups of the feature address stay silent (empty = none).
+  run() { local p="$T/bin:$ORIG_PATH"; [ -n "${4:-}" ] && p="$T/arpbin$4:$p"
           WLC_CONFIG="$1" WLC_DEFAULT="$2" WLC_CUR="$3" PATH="$p" \
             "$SCRIPT" --apply --notify > "$T/out" 2>&1; }
-  reset() { : > "$WLC_NOTIFY_LOG"; : > "$WLC_SCSELECT_LOG"; rm -f "$WLC_STATE" "$T/arpcount"; }
+  reset() { : > "$WLC_NOTIFY_LOG"; : > "$WLC_SCSELECT_LOG"; rm -f "$WLC_STATE"; rm -f "$T"/arpbin*/count; }
 
   OK_CFG="$T/ok.env"; mkcfg "$OK_CFG" "$FIP" "$FMAC" "$FIP" "$FMAC"
   BR_CFG="$T/br.env"; mkcfg "$BR_CFG" "$FIP" "$FMAC" "$DEAD" "$DEAD_MAC"
@@ -288,15 +314,17 @@ EOF
   eq  "N10 状态 default" default "$(st)"
   eq  "N10 不切换"       0 "$(ss_count Automatic)"
 
-  # N6 -- feature unconfirmed, still absent on the retry: one silent fallback
+  # N6 -- absent in every sweep: one fallback on the first one, no notice, and
+  # the run ends on the default location
   reset; run "$NO_CFG" Automatic Home
   has "N6 确认离开"        "$T/out" "we have left"
   eq  "N6 回落一次"        1 "$(ss_count Automatic)"
   eq  "N6 不通知"          0 "$(notify_count)"
   eq  "N6 状态 default"    default "$(st)"
 
-  # N7 -- first round missing but the retry hits: fall back, switch back, silent
-  reset; run "$OK_CFG" Automatic Home arp
+  # N7 -- silent for the whole first pass (8 lookups = 4 sweeps), answered in
+  # the confirmation pass: fall back, switch back, silent throughout
+  reset; run "$OK_CFG" Automatic Home 8
   has "N7 复探命中并切回"  "$T/out" "the device is back after all"
   eq  "N7 回落了一次"      1 "$(ss_count Automatic)"
   eq  "N7 也切回了一次"    1 "$(ss_count Home)"
@@ -309,6 +337,36 @@ EOF
   has "N8 文案说明换了设备" "$T/out" "not the one expected"
   eq  "N8 回落一次"        1 "$(ss_count Automatic)"
   eq  "N8 状态 default"    default "$(st)"
+
+  # N13 -- the fallback is decided after the first sweep, not after the whole
+  # budget, and a device that answers later in the same pass goes straight back
+  # without paying the confirmation wait. Silent for the first 2 lookups is one
+  # sweep; CONFIRM_DELAY stays at 20s, so a run that needed the confirmation
+  # could not finish in less than 20 seconds.
+  export WLC_CONFIRM_DELAY=20
+  reset; t_begin=$(date +%s); run "$OK_CFG" Automatic Home 2; elapsed=$(( $(date +%s) - t_begin ))
+  eq    "N13 首轮扫描未命中就回落" 1 "$(ss_count Automatic)"
+  eq    "N13 剩余预算内静默切回"   1 "$(ss_count Home)"
+  order "N13 先回落再切回"         "falling back to 'Automatic'" "$T/out" "the device is back after all"
+  lt    "N13 没有等确认窗口"       "$elapsed" 20
+  eq    "N13 不通知"               0 "$(notify_count)"
+  eq    "N13 状态 ok"              ok "$(st)"
+  export WLC_CONFIRM_DELAY=1
+
+  # N14 -- moving the decision earlier must not shorten the search: a device
+  # that never answers still costs both passes, four sweeps each, so the run
+  # stays long while the fallback line is timestamped seconds after the start.
+  # CONFIRM_DELAY=0 keeps the wait out of the measurement.
+  reset; t_begin=$(date +%s)
+  WLC_CONFIG="$NO_CFG" WLC_DEFAULT=Automatic WLC_CUR=Home WLC_CONFIRM_DELAY=0 \
+    PATH="$T/bin:$ORIG_PATH" "$SCRIPT" --apply --notify > "$T/out" 2>&1
+  elapsed=$(( $(date +%s) - t_begin ))
+  has "N14 确认离开"        "$T/out" "we have left"
+  eq  "N14 回落一次"        1 "$(ss_count Automatic)"
+  ge  "N14 探测预算没缩短"  "$elapsed" 12
+  # Both lines have to be there for the delay to mean anything: -1 when missing.
+  le  "N14 回落决策提前"    "$(fallback_delay "$T/out")" 3
+  ge  "N14 回落时刻可读"    "$(fallback_delay "$T/out")" 0
 
   # N11 -- an old state file with a miss= line neither suppresses nor blocks
   reset; printf 'state=ok\nmiss=1\n' > "$WLC_STATE"; run "$BR_CFG" Automatic Home
@@ -397,10 +455,10 @@ fi
 
 start=$(date +%s)
 for s in $SUITES; do
-  t0=$(date +%s)
+  suite_start=$(date +%s)
   "suite_$s"
   rc=$?
-  echo "--- $s: $pass passed, $fail failed ($(( $(date +%s) - t0 ))s)"
+  echo "--- $s: $pass passed, $fail failed ($(( $(date +%s) - suite_start ))s)"
   [ "$rc" != 0 ] && echo "--- $s: fixture unusable (rc=$rc)"
   total_pass=$((total_pass + pass)); total_fail=$((total_fail + fail))
 done

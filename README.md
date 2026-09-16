@@ -137,12 +137,49 @@ When no group matches, the script switches to the default location, which is
 ```
 ./wifi-loc-detect.sh                    dry run, prints what it decided and why
 ./wifi-loc-detect.sh --apply            actually switch locations
-./wifi-loc-detect.sh --apply --notify   also post a notification when the
-                                        current network cannot be identified
+./wifi-loc-detect.sh --apply --notify   also notify when the current network
+                                        cannot be identified, once per departure
 ./wifi-loc-detect.sh --print-mac <ip>   print the MAC for an IP (config helper)
 ```
 
 Exit codes: `0` fine, `2` bad usage, `3` config missing.
+
+## Running automatically
+
+A LaunchAgent can apply the decision whenever the network changes, so you do
+not have to run the script yourself:
+
+```sh
+cp com.yayadesu.auto-network-location.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.yayadesu.auto-network-location.plist
+launchctl print gui/$(id -u)/com.yayadesu.auto-network-location
+```
+
+To remove it again:
+
+```sh
+launchctl bootout gui/$(id -u)/com.yayadesu.auto-network-location
+rm ~/Library/LaunchAgents/com.yayadesu.auto-network-location.plist
+```
+
+The job watches `/Library/Preferences/SystemConfiguration` and also runs every
+300 seconds as a safety net. It switches only when a known network is entered;
+when the current network cannot be identified it notifies **once per
+departure**, not once per trigger.
+
+Two prerequisites and two caveats:
+
+- `~/.wifi-loc-control/` must already exist; the job logs to
+  `~/.wifi-loc-control/agent.log` there.
+- The plist holds the absolute path to this checkout. Move the repo and you
+  must reinstall; edit the plist and you must `bootout` then `bootstrap`
+  again, because launchd does not re-read it.
+- `WatchPaths` can miss events (`man launchd.plist` says it is "highly
+  discouraged"), and the 300-second fallback does not fire while the system
+  is asleep. Expect the switch to happen on the next event or within five
+  minutes of waking.
+- The log file grows without bound and is safe to delete; the state file that
+  tracks the away notice is separate.
 
 ## Known limitations
 

@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.yayadesu.auto-network-location</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>__REPO__/wifi-loc-detect.sh</string>
+		<string>--apply</string>
+		<string>--notify</string>
+	</array>
+
+	<!-- Network state lives here, so a change means "decide again". -->
+	<key>WatchPaths</key>
+	<array>
+		<string>/Library/Preferences/SystemConfiguration</string>
+	</array>
+
+	<!-- Safety net: WatchPaths events can be missed (see man launchd.plist). -->
+	<key>StartInterval</key>
+	<integer>300</integer>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+
+	<!-- So osascript notifications land in the GUI session. -->
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+
+	<!-- A string, not an integer: launchd reads plist integers as decimal, so
+	     the leading zero is the only way to express octal 077 here. -->
+	<key>Umask</key>
+	<string>077</string>
+
+	<key>StandardOutPath</key>
+	<string>__HOME__/.wifi-loc-control/agent.log</string>
+	<key>StandardErrorPath</key>
+	<string>__HOME__/.wifi-loc-control/agent.log</string>
+</dict>
+</plist>

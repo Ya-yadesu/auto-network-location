@@ -59,9 +59,11 @@ so a network that needs no separate check needs no extra configuration.
 Leaving is assumed as soon as the characteristic device stops answering, and the
 Mac is returned to the default location (`Automatic`, unless `WLC_DEFAULT` says
 otherwise) so that it works on whatever network it is actually on. The default
-location is DHCP, which is usable almost anywhere, so acting at once is cheap: if
-it turns out to have been a single bad reading, the same run looks again after 15
-seconds and switches back, silently.
+location is DHCP, which is usable almost anywhere, so acting early is cheap and
+the script does not wait out its whole probe budget first: the first pass ends
+after about a second, and the remaining attempts then become the first chance to
+switch back. A last look follows 15 seconds later. If any of those find the
+device, the run returns to that location, silently.
 
 A network that is still there but no longer matches — the device your settings
 depend on is gone, or the address now belongs to something else — is a different
@@ -144,8 +146,10 @@ one and the second check never fires.
 
 When no group matches, the script falls back to the default location, which is
 `Automatic` (override with the `WLC_DEFAULT` environment variable), as soon as
-the characteristic device stops answering. It then looks once more 15 seconds
-later, inside the same run, and switches back if that was a single bad reading.
+the first pass over the configured devices comes back empty — about a second in.
+The rest of the probe budget keeps running, and it looks once more 15 seconds
+later, so a single bad reading is undone inside the same run and nothing is
+reported.
 
 ### 3. Try it
 
@@ -199,10 +203,10 @@ rm ~/Library/LaunchAgents/com.yayadesu.auto-network-location.plist
 
 The job watches `/Library/Preferences/SystemConfiguration` and also runs once
 when it is loaded. It enters a known network when it appears, falls back to the
-default location when the characteristic device stops answering (looking once
-more after 15 seconds in case that was a single bad reading), and notifies when
-the network it is on no longer matches the configured settings — once per state,
-not once per trigger.
+default location as soon as the first pass finds no characteristic device — with
+the rest of the probe budget, and a look 15 seconds later, as the chances to come
+back — and notifies when the network it is on no longer matches the configured
+settings — once per state, not once per trigger.
 
 Two prerequisites and two caveats:
 
@@ -239,9 +243,11 @@ one unless you run that by hand.
   returned to the default location after leaving one. Waking from sleep was
   measured: a run happens about thirty seconds after the lid opens, because
   reconnecting raises a `WatchPaths` event.
-- **Leaving is confirmed inside the same run**, 15 seconds after the fallback, so
-  a single bad reading costs two quick interface reconfigurations instead of a
-  wrong location. Nothing is reported when that happens.
+- **Leaving is decided on the first pass**, about a second in, and confirmed
+  inside the same run: the rest of the probe budget and a look 15 seconds later
+  are the chances to come back. A single bad reading therefore costs two quick
+  interface reconfigurations instead of a wrong location, and nothing is reported
+  when that happens.
 - **Nothing is reported when you leave**, on purpose: the machine is already
   usable on the default location and this happens on every departure. Only a
   device that was replaced, or a location whose target device is gone, is worth

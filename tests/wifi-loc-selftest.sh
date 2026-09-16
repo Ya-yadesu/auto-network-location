@@ -6,7 +6,8 @@
 # `scselect`, `osascript` and `arp`, and every suite stubs the ones it needs:
 #
 #   osascript  records that it was called instead of delivering a notice
-#   scselect   records its argument instead of changing this Mac's location
+#   scselect   records its argument instead of changing this Mac's location; it
+#              never runs the real one, so no suite can move the machine
 #   arp        only in the cases that need the feature address to look absent:
 #              it reports nothing for the first N lookups, N being what one
 #              sweep (2 lookups per rule) or one whole pass (8) costs
@@ -14,14 +15,20 @@
 # Suites (WLC_CONFIRM_DELAY is forced to 1 so the 15s in-run confirmation does
 # not dominate the runtime):
 #
-#   config     10 assertions  the target fields: defaults and validation
-#   state      14 assertions  the notice state machine, minus the decision
-#   decision   48 assertions  the decision table: N1-N8, N10-N14   (~2 minutes)
+#   config     17 assertions  the target fields, strict addresses, the leak sweep
+#   guard       6 assertions  refuses to switch when the location cannot be read
+#   state      20 assertions  the notice state machine, minus the decision
+#   decision   49 assertions  the decision table: N1-N8, N10-N14   (~2 minutes)
 #   reconfirm  13 assertions  N9: the in-run confirmation when the target
 #                             device is a different box. The decision suite
 #                             cannot see this: its target IS the feature
 #                             device, so the run takes the "one device answers
 #                             for both" shortcut and never probes a target.
+#
+# config, state, decision and reconfirm take their devices from the live
+# neighbour table (that is the only thing that exercises the real `arp` output
+# parsing); on a Mac with no neighbour entry they cannot build a fixture, and
+# the runner reports that and fails rather than passing silently.
 #
 # Usage:
 #   tests/wifi-loc-selftest.sh              every suite
@@ -190,6 +197,110 @@ EOF
   has   "越界 IP 被跳过（P3）" "$T/o6" "invalid IP"
   hasnt "越界组未加载"         "$T/o6" "config: rule"
 
+  # Strict addresses. Measured: arp reads a leading zero as octal, so
+  # 192.168.010.1 resolves to 192.168.8.1 -- a different device than the one
+  # written down -- while 0.0.0.0 returns the gateway's entry, which would match
+  # the gateway MAC on whatever network the Mac happens to be on. Both have to
+  # be refused, not probed.
+  cat > "$T/octal.env" <<'EOF'
+LOCATION_1_NAME="Home"
+LOCATION_1_IP="198.51.100.010"
+LOCATION_1_MAC="00:00:5e:00:53:01"
+EOF
+  run "$T/octal.env" "$T/o7"
+  has   "前导零的 IP 被跳过" "$T/o7" "invalid IP"
+  hasnt "前导零组未加载"     "$T/o7" "config: rule"
+
+  cat > "$T/octal-t.env" <<'EOF'
+LOCATION_1_NAME="Home"
+LOCATION_1_IP="192.0.2.1"
+LOCATION_1_MAC="00:00:5e:00:53:01"
+LOCATION_1_TARGET_IP="010.0.2.1"
+EOF
+  run "$T/octal-t.env" "$T/o8"
+  has   "前导零的 TARGET_IP 被跳过" "$T/o8" "invalid TARGET_IP"
+  hasnt "前导零目标组未加载"        "$T/o8" "config: rule"
+
+  cat > "$T/zero.env" <<'EOF'
+LOCATION_1_NAME="Home"
+LOCATION_1_IP="0.0.0.0"
+LOCATION_1_MAC="00:00:5e:00:53:01"
+EOF
+  run "$T/zero.env" "$T/o9"
+  has "0.0.0.0 被跳过（arp 会返回网关条目）" "$T/o9" "invalid IP"
+
+  cat > "$T/mcast.env" <<'EOF'
+LOCATION_1_NAME="Home"
+LOCATION_1_IP="224.0.0.1"
+LOCATION_1_MAC="00:00:5e:00:53:01"
+EOF
+  run "$T/mcast.env" "$T/o10"
+  has "多播地址被跳过" "$T/o10" "invalid IP"
+
+  # Everything the config leaves behind with a LOCATION_ prefix must be gone
+  # before the script runs a child process (`log` runs `date`). Measured with an
+  # `export` in the config: LOCATION_65_NAME used to reach that child.
+  cat > "$T/bin/date" <<'STUB'
+#!/bin/sh
+env | grep '^LOCATION_' >> "$WLC_LEAK_LOG"
+exec /bin/date "$@"
+STUB
+  chmod +x "$T/bin/date"
+  cat > "$T/leak.env" <<'EOF'
+export LOCATION_1_NAME="Home"
+export LOCATION_1_IP="192.0.2.1"
+export LOCATION_1_MAC="00:00:5e:00:53:01"
+export LOCATION_65_NAME="BeyondTheCap"
+export LOCATION_SOMETHING="x"
+EOF
+  : > "$T/leak.log"
+  PATH="$T/bin:$ORIG_PATH" WLC_LEAK_LOG="$T/leak.log" WLC_STATE="$T/state" \
+    WLC_CONFIG="$T/leak.env" "$SCRIPT" > "$T/o11" 2>&1
+  hasnt "配置里其它 LOCATION_* 不泄漏给子进程" "$T/leak.log" "LOCATION_"
+
+  rm -rf "$T"
+}
+
+# --- guard: never switch when the current location cannot be read ------------
+# The current location has exactly one use: deciding whether to call scselect.
+# Every scselect rewrites SystemConfiguration and therefore triggers another
+# run -- measured 2026-09-16, even one naming the location we are already in. So
+# a read that fails must stop the run: guessing "not in the default location"
+# would switch, and re-trigger, once a minute forever.
+suite_guard() {
+  echo "### guard"
+  local T; T=$(mk_stubs); pass=0; fail=0
+  mkdir -p "$T/bin2"
+  cat > "$T/bin2/scselect" <<'STUB'
+#!/bin/sh
+printf '%s\n' "${1:-<read>}" >> "$WLC_SCSELECT_LOG"
+[ -n "${SCSELECT_FAIL:-}" ] && exit 1
+[ -n "${SCSELECT_GARBAGE:-}" ] && { echo "unexpected shape"; exit 0; }
+exit 0
+STUB
+  chmod +x "$T/bin2/scselect"
+  export WLC_SCSELECT_LOG="$T/ss.log" WLC_STATE="$T/state"
+  cat > "$T/c.env" <<'EOF'
+LOCATION_1_NAME="Home"
+LOCATION_1_IP="192.0.2.1"
+LOCATION_1_MAC="00:00:5e:00:53:01"
+EOF
+
+  : > "$WLC_SCSELECT_LOG"
+  PATH="$T/bin2:$ORIG_PATH" SCSELECT_FAIL=1 WLC_CONFIG="$T/c.env" "$SCRIPT" --apply > "$T/out" 2>&1
+  rc=$?
+  eq  "scselect 失败 -> 退出 1"        1 "$rc"
+  eq  "scselect 失败 -> 没有发起切换"  0 "$(grep -c -v '^<read>$' "$WLC_SCSELECT_LOG" | tr -d ' ')"
+  has "scselect 失败 -> 记一行说明"    "$T/out" "cannot determine the current location"
+
+  : > "$WLC_SCSELECT_LOG"
+  PATH="$T/bin2:$ORIG_PATH" SCSELECT_GARBAGE=1 WLC_CONFIG="$T/c.env" "$SCRIPT" --apply > "$T/out" 2>&1
+  rc=$?
+  eq  "输出无法解析 -> 退出 1"         1 "$rc"
+  eq  "输出无法解析 -> 没有发起切换"   0 "$(grep -c -v '^<read>$' "$WLC_SCSELECT_LOG" | tr -d ' ')"
+  has "输出无法解析 -> 记一行说明"     "$T/out" "did not parse"
+
+  unset WLC_SCSELECT_LOG WLC_STATE
   rm -rf "$T"
 }
 
@@ -246,6 +357,30 @@ STUB
   reset; agent "$NO"
   eq "特征未确认 -> 不通知"       0 "$(count)"
   eq "特征未确认 -> 状态 default" default "$(st)"
+
+  # The one departure worth a notice can fail to be delivered. It must then be
+  # recorded as owed rather than written down as delivered: `state` says where
+  # we are (the default location, truthfully) and `pending` says what the user
+  # has not been told yet. The retry happens on the next run that can see the
+  # same anomaly -- same address, still someone else's device.
+  MM="$T/mm.env"; mkcfg "$MM" "$FIP" "$DEAD_MAC" "$FIP" "$DEAD_MAC"
+  pend() { sed -n 's/^pending=//p' "$WLC_STATE" 2>/dev/null | head -1; }
+
+  reset
+  PATH="$T/badbin:$T/bin:$ORIG_PATH" WLC_CONFIG="$MM" WLC_DEFAULT=Automatic WLC_CUR=Home \
+    "$SCRIPT" --apply --notify > "$T/out" 2>&1
+  eq "回落通知投递失败 -> 状态仍如实记 default" default "$(st)"
+  eq "回落通知投递失败 -> 记下欠着的通知"       feature-mismatch "$(pend)"
+
+  : > "$WLC_NOTIFY_LOG"
+  agent "$MM" Automatic
+  has "可观察时 -> 重试那条约通知" "$T/out" "retrying the notice"
+  eq  "重试 -> 送达一次"           1 "$(count)"
+  eq  "重试成功 -> pending 清空"   "" "$(pend)"
+
+  printf 'state=default\npending=feature-mismatch\n' > "$WLC_STATE"
+  agent "$NO" Automatic
+  eq "异常不可观察 -> pending 保留" feature-mismatch "$(pend)"
 
   unset WLC_NOTIFY_LOG WLC_SCSELECT_LOG WLC_STATE WLC_CONFIRM_DELAY
   rm -rf "$T"
@@ -445,7 +580,7 @@ EOF
   rm -rf "$T"
 }
 
-SUITES="config state decision reconfirm"
+SUITES="config guard state decision reconfirm"
 if [ $# -gt 0 ]; then
   case " $SUITES " in
     *" $1 "*) SUITES="$1" ;;
@@ -459,7 +594,13 @@ for s in $SUITES; do
   "suite_$s"
   rc=$?
   echo "--- $s: $pass passed, $fail failed ($(( $(date +%s) - suite_start ))s)"
-  [ "$rc" != 0 ] && echo "--- $s: fixture unusable (rc=$rc)"
+  if [ "$rc" != 0 ]; then
+    # A suite that cannot build its fixture has to fail the run: several suites
+    # take their devices from the live neighbour table, and on a Mac with no
+    # neighbour entry every assertion in them would silently not run at all.
+    echo "--- $s: FIXTURE UNUSABLE (rc=$rc): needs one live neighbour entry"
+    total_fail=$((total_fail + 1))
+  fi
   total_pass=$((total_pass + pass)); total_fail=$((total_fail + fail))
 done
 echo "=== $total_pass passed, $total_fail failed ($(( $(date +%s) - start ))s) ==="

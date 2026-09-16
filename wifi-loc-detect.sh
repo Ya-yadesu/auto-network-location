@@ -30,6 +30,11 @@
 #         switching would silently replace them with DHCP.
 #   * Switching locations is hot: scselect applies the new configuration
 #     immediately, without changing the Wi-Fi network.
+#   * A location is never switched on a guess: if the current location cannot be
+#     read (scselect failing, or output this script does not recognise), the run
+#     exits non-zero without calling scselect at all. Every scselect rewrites
+#     SystemConfiguration and therefore triggers another run, so guessing there
+#     would turn a broken read into a switch, and a re-trigger, once a minute.
 #
 # Config: ~/.wifi-loc-control/locations.env (override with WLC_CONFIG).
 # It is sourced, one numbered group per network:
@@ -90,8 +95,20 @@ done
 
 log() { printf '%s %s\n' "$(date +'[%Y-%m-%d %H:%M:%S]')" "$*"; }
 
+# The current location, or non-zero when it cannot be determined: 1 when
+# `scselect` itself failed, 2 when its output did not match what this script
+# expects. Both mean the same thing to the caller -- unknown -- and unknown must
+# not be guessed at. The only use of this value is deciding whether to call
+# `scselect`, and every `scselect` rewrites SystemConfiguration and therefore
+# triggers another run: measured 2026-09-16, even `scselect` naming the location
+# we are already in does it. Treating a broken read as "not in the default
+# location" would therefore switch, and re-trigger, once a minute forever.
 current_location() {
-  scselect 2>/dev/null | sed -n 's/^ \* .*(\(.*\))$/\1/p'
+  local out parsed
+  out="$(scselect 2>/dev/null)" || return 1
+  parsed="$(printf '%s\n' "$out" | sed -n 's/^ \* .*(\(.*\))$/\1/p')"
+  [[ -n "$parsed" ]] || return 2
+  printf '%s\n' "$parsed"
 }
 
 # Normalize a MAC so that equivalent spellings compare equal. Two things can
@@ -174,41 +191,63 @@ probe_device() {
 
 # Load the rules from the sourced config file into parallel arrays.
 # Returns 0 on success, non-zero when the file is missing or unusable.
-# 0-255 in each octet. A shape-only check accepts 999.1.1.1 and then spends the
-# whole probe budget on an address that cannot exist.
+# Four dotted octets, each 0-255 written in plain decimal, and a unicast first
+# octet. Two measured reasons for being stricter than "looks like an IPv4":
+#
+#   * leading zeros are read as octal by arp and by the resolver. 010 is eight,
+#     so an address ending in .010 was measured to resolve to the .8 address --
+#     a different device than the one written in the config, while .01 quietly
+#     resolved to the .1 that was meant. 08 is not even octal, and the resolver
+#     refuses it outright; a shape-only check with 10# would call it eight.
+#   * arp -n 0.0.0.0 was measured to return the *gateway's* entry, so a config
+#     with 0.0.0.0 would match the gateway MAC on whatever network the Mac is
+#     on. Multicast and the broadcast address are just as meaningless here.
 valid_ipv4() {
-  local ip="$1" oct
+  local ip="$1" oct first="" n=0
   [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
   local IFS=.
   for oct in $ip; do
-    (( 10#$oct <= 255 )) || return 1   # 10# forces base 10, so "08" is eight
+    n=$((n + 1))
+    [[ ${#oct} -gt 1 && "${oct:0:1}" == "0" ]] && return 1
+    (( 10#$oct <= 255 )) || return 1
+    [[ $n -eq 1 ]] && first="$oct"
   done
-  return 0
+  (( 10#$first >= 1 && 10#$first <= 223 ))
 }
 
 load_config() {
   [[ -f "$CONFIG" ]] || return 1
 
-  # The config is sourced: it is code, not data. Variables are unset right
-  # after reading so they cannot leak into anything this script runs later.
+  # The config is sourced: it is code, not data. Copy the groups out first, and
+  # only then remove every LOCATION_* variable in one sweep -- not just the five
+  # known fields of groups 1-64. A config may carry LOCATION_65_* or any other
+  # name with that prefix, and `log` runs `date` as a child process, which
+  # inherits whatever is still exported: measured 2026-09-16, with an `export`
+  # in the config, LOCATION_65_NAME reached that child before this sweep existed.
   # shellcheck disable=SC1090
   source "$CONFIG" || return 2
+
+  local n name ip mac tip tmac v gi
+  local g_idx=() g_names=() g_ips=() g_macs=() g_tips=() g_tmacs=()
+  for (( n = 1; n <= 64; n++ )); do
+    local vn="LOCATION_${n}_NAME" vi="LOCATION_${n}_IP" vm="LOCATION_${n}_MAC"
+    local vt="LOCATION_${n}_TARGET_IP" vc="LOCATION_${n}_TARGET_MAC"
+    name="${!vn:-}"; ip="${!vi:-}"; mac="${!vm:-}"; tip="${!vt:-}"; tmac="${!vc:-}"
+    [[ -z "$name$ip$mac$tip$tmac" ]] && continue
+    g_idx+=("$n"); g_names+=("$name"); g_ips+=("$ip")
+    g_macs+=("$mac"); g_tips+=("$tip"); g_tmacs+=("$tmac")
+  done
+  for v in $(compgen -v | grep '^LOCATION_'); do unset "$v"; done
 
   LOC_NAMES=()
   LOC_IPS=()
   LOC_MACS=()
   LOC_TARGET_IPS=()
   LOC_TARGET_MACS=()
-  local n name ip mac tip tmac
-  for (( n = 1; n <= 64; n++ )); do
-    name="LOCATION_${n}_NAME"; ip="LOCATION_${n}_IP"; mac="LOCATION_${n}_MAC"
-    tip="LOCATION_${n}_TARGET_IP"; tmac="LOCATION_${n}_TARGET_MAC"
-    name="${!name:-}"; ip="${!ip:-}"; mac="${!mac:-}"
-    tip="${!tip:-}"; tmac="${!tmac:-}"
-    unset "LOCATION_${n}_NAME" "LOCATION_${n}_IP" "LOCATION_${n}_MAC" \
-          "LOCATION_${n}_TARGET_IP" "LOCATION_${n}_TARGET_MAC"
+  for (( gi = 0; gi < ${#g_names[@]}; gi++ )); do
+    n="${g_idx[$gi]}"; name="${g_names[$gi]}"; ip="${g_ips[$gi]}"
+    mac="${g_macs[$gi]}"; tip="${g_tips[$gi]}"; tmac="${g_tmacs[$gi]}"
 
-    [[ -z "$name$ip$mac$tip$tmac" ]] && continue
     if [[ -z "$name" || -z "$ip" || -z "$mac" ]]; then
       log "config: LOCATION_$n is incomplete (need NAME, IP and MAC), skipping"
       continue
@@ -260,25 +299,29 @@ load_config() {
   [[ ${#LOC_NAMES[@]} -gt 0 ]]
 }
 
-# The state file records what the user has been told about the current state:
-#   state=default|ok|broken
-# Only the literal value "broken" counts as "already told": a missing, empty or
-# unknown value reads as "not told yet", so the failure direction is one notice
-# too many rather than one silently swallowed. Older formats -- a bare value, or
-# a miss= line from the two-round valve this replaced -- also read as "not told
-# yet", so no migration is needed.
+# read_state / read_pending: the two things the state file records.
+#   state=default|ok|broken  where we are, and what has been reported about it
+#   pending=feature-mismatch a notice that is owed because delivery failed
 # See docs/2026-09-16-decision-model-design.md.
 read_state() {
   [[ -f "$STATE" ]] || return 0
   sed -n 's/^state=//p' "$STATE" 2>/dev/null | head -n 1
 }
 
-# write_state <state>
+read_pending() {
+  [[ -f "$STATE" ]] || return 0
+  sed -n 's/^pending=//p' "$STATE" 2>/dev/null | head -n 1
+}
+
+# write_state <state> [pending]
 # Written through a temporary file in the same directory: a reader must never
-# see a half-written state, because two triggers can overlap.
+# see a half-written state, because two triggers can overlap. Omitting the
+# second argument clears any pending notice.
 write_state() {
   local tmp="${STATE}.tmp.$$"
-  if printf 'state=%s\n' "$1" > "$tmp" 2>/dev/null; then
+  if { printf 'state=%s\n' "$1"
+       if [[ -n "${2:-}" ]]; then printf 'pending=%s\n' "$2"; fi
+     } > "$tmp" 2>/dev/null; then
     mv -f "$tmp" "$STATE" 2>/dev/null || { rm -f "$tmp"; log "could not write state file: $STATE"; }
   else
     log "could not write state file: $STATE"
@@ -322,7 +365,16 @@ fi
 
 # WLC_CUR lets the decision logic be tested without changing the machine's
 # real location; it is not meant to be set in normal use.
-current="${WLC_CUR:-$(current_location)}"
+if [[ -n "${WLC_CUR:-}" ]]; then
+  current="$WLC_CUR"
+else
+  current="$(current_location)"; rc=$?
+  if [[ "$rc" != 0 ]]; then
+    if [[ "$rc" == 1 ]]; then why="scselect failed"; else why="its output did not parse"; fi
+    log "cannot determine the current location ($why); not switching"
+    exit 1
+  fi
+fi
 log "current location: '${current:-?}'"
 
 if ! load_config; then
@@ -417,8 +469,19 @@ done
 
 if [[ -z "$matched_location" ]]; then
   if [[ "$fell_back" != 1 ]]; then
+    # Nothing to switch, but a notice may still be owed from an earlier run: the
+    # user has not been told that the configured address changed hands. Retry it
+    # whenever the anomaly is observable from here, which is when this branch
+    # sees the same mismatch again.
+    pend="$(read_pending)"
+    if [[ "$feature_state" == "mismatch" && "$pend" == "feature-mismatch" ]]; then
+      log "still in '$DEFAULT_LOCATION' with the device changed; retrying the notice"
+      if notify "The device at the configured address is not the one expected. Switched to the default location."; then
+        pend=""
+      fi
+    fi
     log "not on a known network (feature device $feature_state); already in '$DEFAULT_LOCATION', nothing to do"
-    write_state default
+    write_state default "$pend"
     exit 0
   fi
 
@@ -440,9 +503,17 @@ if [[ -z "$matched_location" ]]; then
   # every departure. Only a device that was replaced is worth telling the user.
   log "feature device still $feature_state after ${CONFIRM_DELAY}s; we have left"
   if [[ "$feature_state" == "mismatch" ]]; then
-    notify "The device at the configured address is not the one expected. Switched to the default location."
+    # The one departure worth a notice (section 7). If delivery fails, record the
+    # notice as owed rather than writing it down as delivered: `state` says where
+    # we are, `pending` says what the user has not been told yet.
+    if notify "The device at the configured address is not the one expected. Switched to the default location."; then
+      write_state default
+    else
+      write_state default feature-mismatch
+    fi
+  else
+    write_state default
   fi
-  write_state default
   exit 0
 fi
 

@@ -20,15 +20,14 @@
 		<string>--notify</string>
 	</array>
 
-	<!-- Network state lives here, so a change means "decide again". -->
+	<!-- Run on every network change. There is deliberately no StartInterval:
+	     this is a one-shot script for a specific event, not a poller. If a
+	     WatchPaths event is ever missed the location stays wrong until the next
+	     network change, so the README documents the manual scselect commands. -->
 	<key>WatchPaths</key>
 	<array>
 		<string>/Library/Preferences/SystemConfiguration</string>
 	</array>
-
-	<!-- Safety net: WatchPaths events can be missed (see man launchd.plist). -->
-	<key>StartInterval</key>
-	<integer>300</integer>
 
 	<key>RunAtLoad</key>
 	<true/>

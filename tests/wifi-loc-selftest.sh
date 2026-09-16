@@ -17,7 +17,7 @@
 #
 #   config     17 assertions  the target fields, strict addresses, the leak sweep
 #   guard       6 assertions  refuses to switch when the location cannot be read
-#   state      20 assertions  the notice state machine, minus the decision
+#   state      24 assertions  the notice state machine, minus the decision
 #   decision   49 assertions  the decision table: N1-N8, N10-N14   (~2 minutes)
 #   reconfirm  13 assertions  N9: the in-run confirmation when the target
 #                             device is a different box. The decision suite
@@ -317,7 +317,7 @@ STUB
   export WLC_NOTIFY_LOG="$T/notify.log" WLC_SCSELECT_LOG="$T/ss.log" WLC_STATE="$T/state"
   export WLC_CONFIRM_DELAY=1
   pick_devices
-  [ -z "$FIP" ] && { echo "no live neighbour entry to build the fixture from" >&2; return 1; }
+  [ -z "$FIP" ] || [ -z "$F2MAC" ] && { echo "need two live neighbour entries to build the fixtures from" >&2; return 1; }
 
   count() { wc -l < "$WLC_NOTIFY_LOG" 2>/dev/null | tr -d ' '; }
   st()    { sed -n 's/^state=//p' "$WLC_STATE" 2>/dev/null | head -1; }
@@ -358,25 +358,42 @@ STUB
   eq "特征未确认 -> 不通知"       0 "$(count)"
   eq "特征未确认 -> 状态 default" default "$(st)"
 
-  # The one departure worth a notice can fail to be delivered. It must then be
-  # recorded as owed rather than written down as delivered: `state` says where
-  # we are (the default location, truthfully) and `pending` says what the user
-  # has not been told yet. The retry happens on the next run that can see the
-  # same anomaly -- same address, still someone else's device.
+  # The one departure worth a notice can fail to be delivered -- or never be
+  # asked for. Both leave the notice owed rather than recorded as delivered:
+  # `state` says where we are (the default location, truthfully), `pending` says
+  # what the user has not been told yet, and `pending_rule` says which location
+  # it is about. Nothing but delivery, or that location's own device coming
+  # back, settles it.
   MM="$T/mm.env"; mkcfg "$MM" "$FIP" "$DEAD_MAC" "$FIP" "$DEAD_MAC"
-  pend() { sed -n 's/^pending=//p' "$WLC_STATE" 2>/dev/null | head -1; }
+  pend()     { sed -n 's/^pending=//p' "$WLC_STATE" 2>/dev/null | head -1; }
+  pendrule() { sed -n 's/^pending_rule=//p' "$WLC_STATE" 2>/dev/null | head -1; }
 
   reset
   PATH="$T/badbin:$T/bin:$ORIG_PATH" WLC_CONFIG="$MM" WLC_DEFAULT=Automatic WLC_CUR=Home \
     "$SCRIPT" --apply --notify > "$T/out" 2>&1
   eq "回落通知投递失败 -> 状态仍如实记 default" default "$(st)"
   eq "回落通知投递失败 -> 记下欠着的通知"       feature-mismatch "$(pend)"
+  eq "欠账记着是哪个位置"                        Home "$(pendrule)"
 
+  reset; manual "$MM" Home
+  eq "手动跑（无 --notify）-> 也算欠账" feature-mismatch "$(pend)"
   : > "$WLC_NOTIFY_LOG"
   agent "$MM" Automatic
-  has "可观察时 -> 重试那条约通知" "$T/out" "retrying the notice"
-  eq  "重试 -> 送达一次"           1 "$(count)"
-  eq  "重试成功 -> pending 清空"   "" "$(pend)"
+  has "随后 agent 补发那条通知"        "$T/out" "retrying the notice"
+  eq  "补发 -> 送达一次"               1 "$(count)"
+  eq  "补发成功 -> pending 清空"       "" "$(pend)"
+
+  # Matching a different location must not erase a debt about another one: with
+  # several networks configured, only that location's own feature device coming
+  # back settles it.
+  TWO="$T/two.env"
+  printf 'LOCATION_1_NAME="Home"\nLOCATION_1_IP="%s"\nLOCATION_1_MAC="%s"\nLOCATION_2_NAME="Office"\nLOCATION_2_IP="%s"\nLOCATION_2_MAC="%s"\n' \
+    "$FIP" "$DEAD_MAC" "$F2IP" "$F2MAC" > "$TWO"
+  printf 'state=default\npending=feature-mismatch\npending_rule=Home\n' > "$WLC_STATE"
+  agent "$TWO" Automatic
+  eq "命中别的位置 -> 欠账保留"        feature-mismatch "$(pend)"
+  agent "$OK" Home
+  eq "同一位置特征设备恢复 -> 清空"    "" "$(pend)"
 
   printf 'state=default\npending=feature-mismatch\n' > "$WLC_STATE"
   agent "$NO" Automatic

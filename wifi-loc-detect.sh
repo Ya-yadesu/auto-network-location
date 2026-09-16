@@ -299,9 +299,12 @@ load_config() {
   [[ ${#LOC_NAMES[@]} -gt 0 ]]
 }
 
-# read_state / read_pending: the two things the state file records.
-#   state=default|ok|broken  where we are, and what has been reported about it
-#   pending=feature-mismatch a notice that is owed because delivery failed
+# read_state / read_pending: what the state file records.
+#   state=default|ok|broken   where we are, and what has been reported about it
+#   pending=feature-mismatch  a notice the user has not been told yet
+#   pending_rule=<name>       ... about that location's feature device
+# A location name identifies the debt: with several networks configured, finding
+# Office later must not erase what Home still owes.
 # See docs/2026-09-16-decision-model-design.md.
 read_state() {
   [[ -f "$STATE" ]] || return 0
@@ -313,14 +316,25 @@ read_pending() {
   sed -n 's/^pending=//p' "$STATE" 2>/dev/null | head -n 1
 }
 
-# write_state <state> [pending]
+read_pending_rule() {
+  [[ -f "$STATE" ]] || return 0
+  sed -n 's/^pending_rule=//p' "$STATE" 2>/dev/null | head -n 1
+}
+
+# write_state <state>
 # Written through a temporary file in the same directory: a reader must never
-# see a half-written state, because two triggers can overlap. Omitting the
-# second argument clears any pending notice.
+# see a half-written state, because two triggers can overlap. Whatever is still
+# owed rides along automatically: the owed notice is a pair of variables loaded
+# once per run (pending_kind / pending_rule), and clearing it is an explicit
+# decision made where the user has just been told, or where the device came
+# back. Everything else -- including matching a different location -- keeps it.
 write_state() {
   local tmp="${STATE}.tmp.$$"
   if { printf 'state=%s\n' "$1"
-       if [[ -n "${2:-}" ]]; then printf 'pending=%s\n' "$2"; fi
+       if [[ -n "$pending_kind" ]]; then
+         printf 'pending=%s\n' "$pending_kind"
+         printf 'pending_rule=%s\n' "$pending_rule"
+       fi
      } > "$tmp" 2>/dev/null; then
     mv -f "$tmp" "$STATE" 2>/dev/null || { rm -f "$tmp"; log "could not write state file: $STATE"; }
   else
@@ -389,6 +403,12 @@ matched_location=""
 matched_idx=-1
 matched_desc=""
 feature_state="absent"   # absent | mismatch -- only meaningful when nothing matched
+mismatch_location=""     # the rule whose address answered with the wrong MAC
+
+# What an earlier run still owes the user, loaded once per run. write_state
+# carries it along from here on; see the note on write_state.
+pending_kind="$(read_pending)"
+pending_rule="$(read_pending_rule)"
 
 # One sweep: one attempt at every rule. Sets matched_* and returns 0 as soon as
 # a rule matches. feature_state keeps the reason the sweep failed -- "absent" or
@@ -396,6 +416,7 @@ feature_state="absent"   # absent | mismatch -- only meaningful when nothing mat
 probe_sweep() {
   local idx=0 loc ip mac seen rc
   feature_state="absent"
+  mismatch_location=""
   while [[ $idx -lt ${#LOC_NAMES[@]} ]]; do
     loc="${LOC_NAMES[$idx]}"
     ip="${LOC_IPS[$idx]}"
@@ -415,12 +436,23 @@ probe_sweep() {
       # identifying goes into a notification (see AGENTS.md, section 8).
       log "  device at $ip has MAC $seen, expected $mac (identity mismatch)"
       feature_state="mismatch"
+      mismatch_location="$loc"
     else
       log "  no answer from $ip"
     fi
     idx=$((idx + 1))
   done
   return 1
+}
+
+# An owed notice is about one location's feature device. Standing on that
+# network with the device matching again means the anomaly is over, so the debt
+# can go; nothing else does. Called once matched_* is final.
+forget_pending_if_resolved() {
+  if [[ -n "$pending_kind" && -n "$pending_rule" && "$pending_rule" == "$matched_location" ]]; then
+    log "feature device for '$matched_location' is present; the owed notice is resolved"
+    pending_kind=""
+  fi
 }
 
 # --- Leaving. While we are standing in a known location, the first sweep
@@ -470,18 +502,20 @@ done
 if [[ -z "$matched_location" ]]; then
   if [[ "$fell_back" != 1 ]]; then
     # Nothing to switch, but a notice may still be owed from an earlier run: the
-    # user has not been told that the configured address changed hands. Retry it
-    # whenever the anomaly is observable from here, which is when this branch
-    # sees the same mismatch again.
-    pend="$(read_pending)"
-    if [[ "$feature_state" == "mismatch" && "$pend" == "feature-mismatch" ]]; then
+    # user has not been told that this location's address changed hands. Retry it
+    # whenever the anomaly is observable from here -- the same address still
+    # answering with a different MAC. A debt carried from an older state file has
+    # no rule recorded, so any mismatch is taken as the chance to settle it.
+    if [[ "$feature_state" == "mismatch" && "$pending_kind" == "feature-mismatch" ]] \
+       && { [[ -z "$pending_rule" ]] || [[ "$pending_rule" == "$mismatch_location" ]]; }; then
       log "still in '$DEFAULT_LOCATION' with the device changed; retrying the notice"
       if notify "The device at the configured address is not the one expected. Switched to the default location."; then
-        pend=""
+        # Only a delivery that was actually asked for settles the debt.
+        [[ "$NOTIFY" == 1 ]] && pending_kind=""
       fi
     fi
     log "not on a known network (feature device $feature_state); already in '$DEFAULT_LOCATION', nothing to do"
-    write_state default "$pend"
+    write_state default
     exit 0
   fi
 
@@ -503,17 +537,21 @@ if [[ -z "$matched_location" ]]; then
   # every departure. Only a device that was replaced is worth telling the user.
   log "feature device still $feature_state after ${CONFIRM_DELAY}s; we have left"
   if [[ "$feature_state" == "mismatch" ]]; then
-    # The one departure worth a notice (section 7). If delivery fails, record the
-    # notice as owed rather than writing it down as delivered: `state` says where
-    # we are, `pending` says what the user has not been told yet.
+    # The one departure worth a notice (section 7). It counts as told only when
+    # --notify was asked for *and* the delivery worked; a manual run has told
+    # nobody, so the notice stays owed for the next agent run to deliver.
+    delivered=0
     if notify "The device at the configured address is not the one expected. Switched to the default location."; then
-      write_state default
-    else
-      write_state default feature-mismatch
+      [[ "$NOTIFY" == 1 ]] && delivered=1
     fi
-  else
-    write_state default
+    if [[ "$delivered" == 1 ]]; then
+      pending_kind=""
+    else
+      pending_kind="feature-mismatch"
+      pending_rule="$mismatch_location"
+    fi
   fi
+  write_state default
   exit 0
 fi
 
@@ -535,6 +573,10 @@ if [[ "$matched_location" != "$current" ]]; then
 else
   log "already in '$matched_location', nothing to do"
 fi
+
+# We are on this location's network and its feature device matched, so any debt
+# about that device is settled. A debt about a different location survives.
+forget_pending_if_resolved
 
 tip="${LOC_TARGET_IPS[$matched_idx]}"
 tmac="${LOC_TARGET_MACS[$matched_idx]}"

@@ -181,6 +181,9 @@ location cannot be read (`scselect` failed, or its output changed shape): acting
 on a guess there would mean switching blind, and every switch triggers another
 run.
 
+A run without `--notify` delivers nothing, and it does not record a notice as
+delivered either — the next run with `--notify` still sends it.
+
 ## Running automatically
 
 A LaunchAgent can apply the decision whenever the network changes, so you do

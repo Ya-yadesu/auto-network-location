@@ -188,13 +188,13 @@ Two prerequisites and two caveats:
 
 ## Known limitations
 
-- **Automatic operation is verified, with one gap: waking from sleep.** With the
-  LaunchAgent loaded, the location is switched unattended when a known network
-  is entered, and an unidentifiable network is reported once per departure
-  rather than once per trigger. `WatchPaths` is race-prone and the 300-second
-  fallback does not fire while the system is asleep, so expect the switch on the
-  next event or within five minutes of waking; whether waking itself triggers a
-  run has not been measured yet.
+- **Automatic operation is verified.** With the LaunchAgent loaded, the location
+  is switched unattended when a known network is entered, and an unidentifiable
+  network is reported once per departure rather than once per trigger. Waking
+  from sleep was measured: a run happens about thirty seconds after the lid
+  opens, and the 300-second fallback bounds the worst case at five minutes.
+  `WatchPaths` is race-prone, so a missed event is caught by that fallback
+  rather than immediately.
 - Leaving a non-default location needs a human decision (a notification, not a
   switch), by design.
 - A characteristic device that is powered off makes its network unidentifiable.

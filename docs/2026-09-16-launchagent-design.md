@@ -118,11 +118,11 @@ Label：`com.yayadesu.auto-network-location`
 
 ## 7. 已知弱点（记录，不修）
 
-- **唤醒后是否立刻触发，未知。** `man launchd.plist` 对两个键都有明确警告：
+- **唤醒行为已实测（2026-09-16）：不需要常驻轮询方案。** `man launchd.plist` 对两个键都有明确警告：
   - `WatchPaths`："Use of this key is **highly discouraged**, as filesystem event monitoring is highly race-prone, and it is entirely possible for modifications to be **missed**."
   - `StartInterval`："If the system is **asleep** during the time of the next scheduled interval firing, **that interval will be missed** due to shortcomings in kqueue(3)."
 
-  也就是说兜底**不覆盖睡眠**：睡眠期间错过的间隔是直接跳过，不是延后补发。它能保证的只是「唤醒后最多 5 分钟内会跑一次」。而「开盖那一刻就切」取决于 `WatchPaths` 会不会在重新关联 Wi-Fi 时触发——**必须实测，不能推理**。若实测证明唤醒不触发且 5 分钟静默期不可接受，退回「常驻轮询进程」方案（`KeepAlive` + 自己 sleep，唤醒后循环自然继续）。
+  实测（合盖 11:27–11:32，对照 `pmset -g log`）：合盖期间系统有多次 **DarkWake**（每次约 10 秒），agent 在其中跑了两轮**事件驱动**的检查（11:27:40、11:28:47，都不在 300 秒网格上）；真正的唤醒（11:32:16，`lid`/UserActivity）之后 **32 秒**跑了一轮，并正常探到设备。兜底仍是硬上限：最坏情况等于 `StartInterval` 的 5 分钟。据此确认**备选方案 2（常驻轮询进程）不需要**。
 
 - **一次未解释的 8 秒探测失败（2026-09-16，待查）。** 10:49:38 那次由 `scselect` 触发的运行里，探测器对特征设备连续重试约 8 秒全是 `no answer`，位置因此停在 `Automatic`；39 秒后再探立刻命中。使用者已确认**当时连着的是家里的网络**（不是热点），所以这条不能用「换网」解释，也尚未复现：实测接口在切换后约 **3 秒**就拿到 DHCP 地址并解析出邻居条目，另有两次无人干预的运行分别在 1 秒和 3 秒内命中。**如果它会复发**，症状是「该切的时候没切，最多等一个 `StartInterval`」。复发时按第 9 节 V4 的重复实验取证，不要凭推理改探测逻辑。
 - **`agent.log` 无界增长。** 每次运行 4–8 行；若每天数百次触发就是每年几十 MB 量级。删除是安全的（`state` 是独立文件，删掉只会让下次离家重新通知一次）。暂不做轮转。
@@ -160,7 +160,7 @@ rm ~/Library/LaunchAgents/com.yayadesu.auto-network-location.plist
 | V5 | 自触发收敛 | 数 V4 期间的运行轮数 | 只多跑一轮，或被 `ThrottleInterval` 抑制；**不出现连续多轮** |
 | V6 | 手动触发 | `launchctl kickstart -k gui/$(id -u)/<label>` | 产生一轮运行 |
 | V7 | 离家去重 | 连手机热点，等触发，再手动 `kickstart` | 通知**只弹一次**；第二次日志里出现「已报告过」那一行 |
-| V8 | 唤醒 | 真实睡眠一次，唤醒后观察 | 记录唤醒后多久跑了一轮（本设计的核心未知数） |
+| V8 | 唤醒 | 真实合盖睡眠约 5 分钟，再把 `pmset -g log` 的 Sleep/Wake/DarkWake 时刻与 `agent.log` 对齐 | 已实测：唤醒后 **32 秒**触发一轮；合盖期间的 DarkWake 里也有两轮事件驱动运行。因此不需要常驻轮询 |
 | V9 | 权限 | `stat` 两个运行时文件 | `state` 600；`agent.log` **默认 644**（launchd 创建，`Umask` 管不到），按第 4 节预置后应为 600 |
 | V10 | 日志行为 | 多次运行后看行数 | 确认 launchd 是追加而非截断，并据实写入文档 |
 

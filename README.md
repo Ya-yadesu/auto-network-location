@@ -188,13 +188,13 @@ Two prerequisites and two caveats:
 
 ## Known limitations
 
-- **The "away" case is verified across a network change, not a real departure.**
-  With the Mac left in a non-default location and joined to a different network,
-  the characteristic device left the neighbour table — no stale entry remained —
-  and the script reported it as absent and posted a notification instead of
-  switching. Leaving Wi-Fi entirely is not covered by that run. Automatic
-  *triggering* is a separate matter and still absent: there is no LaunchAgent
-  yet, so the script is run by hand.
+- **Automatic operation is verified, with one gap: waking from sleep.** With the
+  LaunchAgent loaded, the location is switched unattended when a known network
+  is entered, and an unidentifiable network is reported once per departure
+  rather than once per trigger. `WatchPaths` is race-prone and the 300-second
+  fallback does not fire while the system is asleep, so expect the switch on the
+  next event or within five minutes of waking; whether waking itself triggers a
+  run has not been measured yet.
 - Leaving a non-default location needs a human decision (a notification, not a
   switch), by design.
 - A characteristic device that is powered off makes its network unidentifiable.

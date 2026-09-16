@@ -186,7 +186,7 @@ echo "=== $pass passed, $fail failed ==="
 ## 7. 路线图
 
 1. 探测器（本脚本）：只判断，`--apply` 才切换。**已完成**
-2. 事件驱动常驻：LaunchAgent + `WatchPaths` 监视 `/Library/Preferences/SystemConfiguration/`；自触发靠幂等收敛（实测无失控）。**已完成**——注意实测节奏是每 60 秒一轮（见第 5 节），不是每 5 分钟。
+2. 事件驱动常驻：LaunchAgent + `WatchPaths` 监视 `/Library/Preferences/SystemConfiguration/`；自触发靠幂等收敛（实测无失控）。**已完成**
 3. 菜单栏：显示当前位置并可点击切换（macOS 已移除位置 UI，`networksetup -listlocations` 之外没有图形入口）。
 
 ## 8. 隐私

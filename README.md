@@ -128,8 +128,14 @@ is a *value* rather than a variable name, so it may contain spaces and non-ASCII
 characters (`LOCATION_1_NAME="My Home"` is fine).
 
 The file is **sourced**, so it is code, not data: keep it owned by you with mode
-600, and do not copy one in from an untrusted source. The script unsets the
-`LOCATION_*` variables immediately after reading them.
+600, and do not copy one in from an untrusted source. Every `LOCATION_*`
+variable the file leaves behind is removed before the script runs anything else.
+
+Addresses are read strictly: plain decimal, no leading zeros, and a unicast
+first octet. `arp` reads a leading zero as octal — `010` is eight, so
+`198.51.100.010` would probe `198.51.100.8` — and `0.0.0.0` resolves to whatever
+the Mac's gateway happens to be. A group written either way is skipped with a
+line in the log rather than probing an address you did not configure.
 
 Find the MAC from the network itself, while connected to it:
 
@@ -170,7 +176,10 @@ reported.
 ```
 
 Exit codes: `0` fine, `1` a switch or a MAC lookup failed, `2` bad usage, `3`
-config missing.
+config missing. A run also exits `1` without switching anything when the current
+location cannot be read (`scselect` failed, or its output changed shape): acting
+on a guess there would mean switching blind, and every switch triggers another
+run.
 
 ## Running automatically
 

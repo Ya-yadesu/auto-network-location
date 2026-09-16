@@ -42,22 +42,34 @@ Properties of this probe:
 
 ## Scope of the automation
 
-Only one direction is automatic. Entering a known location is automatic;
-leaving one is not.
+Both directions are automatic, but only leaving is unconditional.
 
 | Current state | Probe result | Action |
 |---|---|---|
 | `Automatic` | matches a known network | switch to that location |
-| in that location | matches | nothing (idempotent) |
-| in a location | no match | **notify** the user, do not switch |
-| `Automatic` | no match | nothing (already the default) |
+| in that location | matches, target device present | nothing (idempotent) |
+| in that location | matches, target device missing | **notify**, do not switch |
+| in any location | no known network found | **switch back to the default location** |
 
-Leaving a non-default location is not automated on purpose: a device that stops
-answering ARP can mean a real change (cabling, router swap, MAC change) that a
-script should not silently guess about. A notification tells you to check the
-network settings — the failure mode this project exists to remove is exactly
-"static settings applied to the wrong network", and silently switching away can
-mask it.
+A network is described by two devices. The *characteristic* device answers "which
+network is this"; the optional *target* device answers "is this still the network
+my settings were written for". The target defaults to the characteristic device,
+so a network that needs no separate check needs no extra configuration.
+
+Leaving is assumed as soon as the characteristic device stops answering, and the
+Mac is returned to the default location (`Automatic`, unless `WLC_DEFAULT` says
+otherwise) so that it works on whatever network it is actually on. The default
+location is DHCP, which is usable almost anywhere, so acting early is cheap and
+the script does not wait out its whole probe budget first: the first pass ends
+after about a second, and the remaining attempts then become the first chance to
+switch back. A last look follows 15 seconds later. If any of those find the
+device, the run returns to that location, silently.
+
+A network that is still there but no longer matches — the device your settings
+depend on is gone, or the address now belongs to something else — is a different
+case. That one is reported rather than papered over, because switching away would
+silently replace your static settings with DHCP, which is exactly the failure
+this project exists to remove.
 
 To use the upstream router temporarily while staying in a location, edit that
 location's settings directly. Location switching and temporary gateway changes
@@ -99,6 +111,13 @@ LOCATION_1_NAME="Home"
 LOCATION_1_IP="192.0.2.1"
 LOCATION_1_MAC="00:00:5e:00:53:01"
 
+# Optional: the device this location's own settings depend on (its gateway or
+# DNS). Omit it and the characteristic device above is used. If you give one,
+# give it in full: a malformed target skips the whole group rather than being
+# silently ignored.
+# LOCATION_1_TARGET_IP="192.0.2.100"
+# LOCATION_1_TARGET_MAC="00:00:5e:00:53:02"
+
 # LOCATION_2_NAME="Office"
 # LOCATION_2_IP="198.51.100.1"
 # LOCATION_2_MAC="aa:bb:cc:dd:ee:ff"
@@ -109,8 +128,14 @@ is a *value* rather than a variable name, so it may contain spaces and non-ASCII
 characters (`LOCATION_1_NAME="My Home"` is fine).
 
 The file is **sourced**, so it is code, not data: keep it owned by you with mode
-600, and do not copy one in from an untrusted source. The script unsets the
-`LOCATION_*` variables immediately after reading them.
+600, and do not copy one in from an untrusted source. Every `LOCATION_*`
+variable the file leaves behind is removed before the script runs anything else.
+
+Addresses are read strictly: plain decimal, no leading zeros, and a unicast
+first octet. `arp` reads a leading zero as octal — `010` is eight, so
+`198.51.100.010` would probe `198.51.100.8` — and `0.0.0.0` resolves to whatever
+the Mac's gateway happens to be. A group written either way is skipped with a
+line in the log rather than probing an address you did not configure.
 
 Find the MAC from the network itself, while connected to it:
 
@@ -118,12 +143,19 @@ Find the MAC from the network itself, while connected to it:
 ./wifi-loc-detect.sh --print-mac 192.0.2.1
 ```
 
-Each location needs its own group collected on its own network. A location's
-device must be present from both the `Automatic` and that location's state — an
-upstream router satisfies that for a home network.
+Each location needs its own group collected on its own network. The
+characteristic device must be present from both the `Automatic` and that
+location's state — an upstream router satisfies that for a home network. If the
+location's settings point at a different box (its gateway or DNS), name that box
+as `LOCATION_n_TARGET_IP` / `_TARGET_MAC`; otherwise the two roles collapse into
+one and the second check never fires.
 
-When no group matches, the script switches to the default location, which is
-`Automatic` (override with the `WLC_DEFAULT` environment variable).
+When no group matches, the script falls back to the default location, which is
+`Automatic` (override with the `WLC_DEFAULT` environment variable), as soon as
+the first pass over the configured devices comes back empty — about a second in.
+The rest of the probe budget keeps running, and it looks once more 15 seconds
+later, so a single bad reading is undone inside the same run and nothing is
+reported.
 
 ### 3. Try it
 
@@ -137,35 +169,116 @@ When no group matches, the script switches to the default location, which is
 ```
 ./wifi-loc-detect.sh                    dry run, prints what it decided and why
 ./wifi-loc-detect.sh --apply            actually switch locations
-./wifi-loc-detect.sh --apply --notify   also post a notification when the
-                                        current network cannot be identified
+./wifi-loc-detect.sh --apply --notify   also notify when this network no
+                                        longer matches the settings (leaving is
+                                        silent, unless a device was replaced)
 ./wifi-loc-detect.sh --print-mac <ip>   print the MAC for an IP (config helper)
 ```
 
-Exit codes: `0` fine, `2` bad usage, `3` config missing.
+Exit codes: `0` fine, `1` a switch or a MAC lookup failed, `2` bad usage, `3`
+config missing. A run also exits `1` without switching anything when the current
+location cannot be read (`scselect` failed, or its output changed shape): acting
+on a guess there would mean switching blind, and every switch triggers another
+run.
+
+A run without `--notify` delivers nothing, and it does not record a notice as
+delivered either — the next run with `--notify` still sends it.
+
+## Running automatically
+
+A LaunchAgent can apply the decision whenever the network changes, so you do
+not have to run the script yourself:
+
+```sh
+touch ~/.wifi-loc-control/agent.log && chmod 600 ~/.wifi-loc-control/agent.log
+sed "s|__REPO__|$PWD|; s|__HOME__|$HOME|" com.yayadesu.auto-network-location.plist \
+  > ~/Library/LaunchAgents/com.yayadesu.auto-network-location.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.yayadesu.auto-network-location.plist
+launchctl print gui/$(id -u)/com.yayadesu.auto-network-location
+```
+
+Run that from the root of this checkout: the plist ships with two placeholders
+(`__REPO__` for the checkout path, `__HOME__` for your home directory) because
+launchd expands neither `~` nor environment variables, so those paths must be
+literal by the time launchd reads the file.
+
+The first line pre-creates the log with mode 600. launchd creates the
+`StandardOutPath` file itself and the plist's `Umask` key does not apply to it,
+so a pre-existing file is the only way to keep the log private.
+
+To remove it again:
+
+```sh
+launchctl bootout gui/$(id -u)/com.yayadesu.auto-network-location
+rm ~/Library/LaunchAgents/com.yayadesu.auto-network-location.plist
+```
+
+The job watches `/Library/Preferences/SystemConfiguration` and also runs once
+when it is loaded. It enters a known network when it appears, falls back to the
+default location as soon as the first pass finds no characteristic device — with
+the rest of the probe budget, and a look 15 seconds later, as the chances to come
+back — and notifies when the network it is on no longer matches the configured
+settings — once per state, not once per trigger.
+
+Two prerequisites and two caveats:
+
+- `~/.wifi-loc-control/` must already exist; the job logs to
+  `~/.wifi-loc-control/agent.log` there.
+- The plist holds the absolute path to this checkout. Move the repo and you
+  must reinstall; edit the plist and you must `bootout` then `bootstrap`
+  again, because launchd does not re-read it.
+- `WatchPaths` can miss events (`man launchd.plist` says it is "highly
+  discouraged"), and this job deliberately has no periodic fallback: it is a
+  one-shot script for a specific event, not a poller. A missed event therefore
+  leaves the location wrong until the next network change, which is why the
+  manual command below matters.
+- The log file grows without bound and is safe to delete; the state file that
+  records what has already been reported is separate.
+
+### If it gets it wrong
+
+macOS no longer exposes any location UI, so switching by hand is one command:
+
+```sh
+networksetup -listlocations     # the locations that exist, and the current one
+scselect                        # the same, more briefly
+scselect Home                   # switch to a location
+```
+
+Because the job only runs on a network change, a wrong guess stays until the next
+one unless you run that by hand.
 
 ## Known limitations
 
-- **The "away" case is verified across a network change, not a real departure.**
-  With the Mac left in a non-default location and joined to a different network,
-  the characteristic device left the neighbour table — no stale entry remained —
-  and the script reported it as absent and posted a notification instead of
-  switching. Leaving Wi-Fi entirely is not covered by that run. Automatic
-  *triggering* is a separate matter and still absent: there is no LaunchAgent
-  yet, so the script is run by hand.
-- Leaving a non-default location needs a human decision (a notification, not a
-  switch), by design.
-- A characteristic device that is powered off makes its network unidentifiable.
-- Only one characteristic device per network is supported; a collision needs a
-  different device or a future multi-condition rule.
+- **Automatic operation is verified.** With the LaunchAgent loaded, the location
+  is switched unattended when a known network is entered, and the machine is
+  returned to the default location after leaving one — measured at about two
+  seconds from the network change, and silently. Waking from sleep was measured
+  too: a run happens about thirty seconds after the lid opens, because
+  reconnecting raises a `WatchPaths` event.
+- **Leaving is decided on the first pass**, about a second in, and confirmed
+  inside the same run: the rest of the probe budget and a look 15 seconds later
+  are the chances to come back. A single bad reading therefore costs two quick
+  interface reconfigurations instead of a wrong location, and nothing is reported
+  when that happens.
+- **Nothing is reported when you leave**, on purpose: the machine is already
+  usable on the default location and this happens on every departure. Only a
+  device that was replaced, or a location whose target device is gone, is worth
+  a notice.
+- Both devices must match address *and* MAC. A characteristic device that is
+  powered off, or whose address has been taken over by something else, makes its
+  network unidentifiable.
+- Only one characteristic device and one target device per network; a collision
+  needs a different device or a future multi-condition rule.
 - IPv6 state is per location and must be set per location; it is not inferred.
 
 ## Roadmap
 
-1. **Detector** — this script. Decision only, `--apply` to switch. *(done)*
+1. **Detector** — this script. Decide, and switch with `--apply`. *(done)*
 2. **Event-driven daemon** — a LaunchAgent on `WatchPaths` over
    `/Library/Preferences/SystemConfiguration/`, with de-duplication: switching a
    location rewrites that directory and therefore triggers the agent again.
+   *(done)*
 3. **Menu bar** — show the current location and allow switching from the menu,
    since macOS no longer exposes any location UI.
 

@@ -1,5 +1,7 @@
 # LaunchAgent（事件驱动触发层）实施计划
 
+**状态：已执行**——6 个任务全部完成并验证（2026-09-16）。步骤前的方框未逐条勾选，但每一步的结果都记在 `AGENTS.md` 第 6 节。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 给已经实测通过的探测器接上 launchd 触发层，使加入已知网络时自动切换位置、离开时只通知一次。
@@ -52,7 +54,7 @@
 #!/bin/bash
 # V2 from the spec: the notification transition state machine.
 set -u
-cd __REPO__ || exit 1
+cd $(git rev-parse --show-toplevel) || exit 1
 T=$(mktemp -d); STUB="$T/bin"; mkdir -p "$STUB"
 cat > "$STUB/osascript" <<'STUBEOF'
 #!/bin/sh
@@ -234,7 +236,7 @@ Expected: `bash -n` 静默通过；状态机 **11 passed, 0 failed**。注意离
 Run:
 
 ```sh
-cd __REPO__
+cd $(git rev-parse --show-toplevel)
 T=$(mktemp -d); IP=203.0.113.7
 S=$(mktemp -d)
 IPL=$(arp -an | sed -n 's/^? (\([0-9.]*\)) at \([0-9a-fA-F:]*\) on [a-z0-9]* .*/\1 \2/p' | grep -vE '^(224|239)\.' | head -1 | awk '{print $1}')
@@ -357,9 +359,15 @@ A LaunchAgent can apply the decision whenever the network changes, so you do
 not have to run the script yourself:
 
 ```sh
+touch ~/.wifi-loc-control/agent.log && chmod 600 ~/.wifi-loc-control/agent.log
 cp com.yayadesu.auto-network-location.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.yayadesu.auto-network-location.plist
 launchctl print gui/$(id -u)/com.yayadesu.auto-network-location
+```
+
+The first line pre-creates the log with mode 600. launchd creates the
+`StandardOutPath` file itself and the plist's `Umask` key does not apply to it,
+so a pre-existing file is the only way to keep the log private.
 ```
 
 To remove it again:
@@ -442,56 +450,70 @@ instead of 077."
 
 - [ ] **Step 1: 安装**
 
-Run（需要写入工作区之外，可能要提权）：
+先预置日志文件（`Umask` 管不到 launchd 创建的 `StandardOutPath`，实测是 644；先建好 600 的文件，launchd 打开时不会改权限）：
 
 ```sh
+touch ~/.wifi-loc-control/agent.log && chmod 600 ~/.wifi-loc-control/agent.log
 cp __REPO__/com.yayadesu.auto-network-location.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.yayadesu.auto-network-location.plist
+echo "bootstrap rc=$?"
 ```
 
-Expected: 无输出即成功。若报 `Bootstrap failed: 5: Input/output error`，说明该 label 已装载，先 `bootout` 再 `bootstrap`。
+Expected: `rc=0`。**不要给 `bootstrap` 加 `2>/dev/null`**：在受限沙箱里它失败的形式是 `Bootstrap failed: 5: Input/output error`，被吞掉后你会误以为 agent 已装载（2026-09-16 实际踩过，白等 88 秒）。若确实报 5，先 `bootout` 再 `bootstrap`；若仍报 5 且沙箱模式为 workspace-write，说明该操作需要提权。
 
 - [ ] **Step 2: 确认已装载并已跑过一轮**
 
 Run: `launchctl print gui/$(id -u)/com.yayadesu.auto-network-location | sed -n '1,25p'; echo ---; tail -12 ~/.wifi-loc-control/agent.log`
 Expected: `print` 输出里有 `state = not running`（或 `running`）与 `program = /bin/bash`；日志里已有一条 `RunAtLoad` 引起的运行，末行是 `already in 'Home', nothing to do` 或 `switched to 'Home'`。
 
-- [ ] **Step 3: 验证文件权限（同时验证 `Umask` 字符串写法）**
+- [ ] **Step 3: 验证文件权限**
 
 Run: `stat -f '%Sp %Su %N' ~/.wifi-loc-control/state ~/.wifi-loc-control/agent.log`
-Expected: 两行都是 `-rw-------`。若出现 `-rw-r--r--`，说明 `Umask` 生效成了别的值——回到 Task 2 Step 1 检查它必须是字符串 `"077"`。
+Expected: `state` 是 `-rw-------`；`agent.log` 若在 Step 1 预置过也应是 `-rw-------`。若日志是 `-rw-r--r--`，那不是 `Umask` 写错了（2026-09-16 实测字符串 `"077"` 下 `launchctl print` 显示 `umask = 77`、`state` 确实是 600），而是 launchd 创建的日志文件不受 `Umask` 约束——补做 Step 1 的预置即可。
 
-- [ ] **Step 4: 端到端——不手动运行脚本，让 agent 自己切回来**
+- [ ] **Step 4: 端到端——不手动运行脚本，让 agent 自己切回来（重复 3 轮）**
 
-先等 **65 秒**再动手：`ThrottleInterval 60` 是从**上一次启动**起算的，而 Step 1 的 `bootstrap` 已经因 `RunAtLoad` 跑过一轮。不等过这个窗口，`scselect` 引起的事件可能被直接抑制，测试会得出错误结论。
+先等 **65 秒**：`ThrottleInterval 60` 从**上一次启动**起算，而 Step 1 的 `bootstrap` 已因 `RunAtLoad` 跑过一轮。
+
+**`ThrottleInterval` 是延后补跑，不是丢弃**（2026-09-16 实测）：落在窗口内的 `WatchPaths` 事件不会被丢掉，而是等窗口一过就补跑一次——实测事件被推迟约 48–50 秒后仍然执行了。所以**观察窗口必须长于 60 秒**、**轮与轮之间也要隔开 60 秒以上**，否则你会把「被推迟」误读成「没反应」。（第一版配方用 45 秒窗口 + 70 秒间隔，三轮里两轮因此误判。）
+
+**开始前必须满足两个前提**，否则本轮作废：设备在邻居表里（`arp -n "$TARGET_IP"` 有 ` at `），以及**这期间没有人手动改 Wi-Fi 网络或关 Wi-Fi**。2026-09-16 曾因为忽略后者，把一次「设备真的不在场」的正确判断误读成探测缺陷。注意下面从本地配置推导目标地址——**不要把真机地址写进本文件**（AGENTS.md 第 8 节）。
 
 ```sh
-sleep 65
-before=$(grep -c 'current location:' ~/.wifi-loc-control/agent.log)
-scselect Automatic
-sleep 25
-echo "location: $(scselect | sed -n 's/^ \* .*(\(.*\))$/\1/p')"
-after=$(grep -c 'current location:' ~/.wifi-loc-control/agent.log)
-echo "runs added: $((after - before))"
-tail -20 ~/.wifi-loc-control/agent.log
+TARGET_IP=$(sed -n 's/^LOCATION_1_IP="\(.*\)"/\1/p' ~/.wifi-loc-control/locations.env)
+for round in 1 2 3; do
+  echo "=== Round $round ==="
+  [ "$(scselect | sed -n 's/^ \* .*(\(.*\))$/\1/p')" = Home ] || { scselect Home >/dev/null; sleep 90; }
+  echo "  设备: $(arp -n "$TARGET_IP" | grep -q ' at ' && echo 在场 || echo 不在场)"
+  before=$(grep -c 'current location:' ~/.wifi-loc-control/agent.log)
+  t0=$(date +%s); scselect Automatic >/dev/null; switched=no
+  for i in $(seq 1 30); do
+    sleep 3
+    if [ "$(scselect | sed -n 's/^ \* .*(\(.*\))$/\1/p')" = Home ]; then
+      switched=yes; echo "  → 切回 Home，用时 ≈ $(( $(date +%s) - t0 ))s"; break; fi
+  done
+  [ "$switched" = no ] && echo "  → 90s 内未切回；结束时设备: $(arp -n "$TARGET_IP" | grep -q ' at ' && echo 在场 || echo 不在场)"
+  grep -c 'current location:' ~/.wifi-loc-control/agent.log | sed 's/^/  累计轮数: /'
+  [ "$round" != 3 ] && sleep 130
+done
 ```
 
-Expected: 位置在 25 秒内回到 `Home`；新增运行轮数为 **1 或 2**（agent 那一轮 + 可能的自触发那一轮）。**若 >=3，说明自触发没有收敛**——停下来记录日志内容再判断，不要继续后面的任务。
+Expected: 每轮都在 90 秒内切回 `Home`（实测正常情况是 1–6 秒，被节流时约 50–60 秒），日志显示是 agent 触发的。**若某轮没切回**，先看那一刻设备是否在场：不在场说明本轮被中断（作废），在场则是真的没动作——记录时间与日志，作为第 7 节那个待查项的复发证据。**若某轮新增运行轮数 >=3，说明自触发没有收敛**，停下来记录日志，不要继续后面的任务。
 
-- [ ] **Step 5: 确认幂等（再等一个周期）**
+- [ ] **Step 5: 确认幂等（不出现连续多轮）**
 
-Run: `sleep 20; scselect | sed -n 's/^ \* .*(\(.*\))$/\1/p'; grep -c 'switched to' ~/.wifi-loc-control/agent.log`
-Expected: 位置仍是 `Home`，`switched to` 的累计行数**不再增长**。
+Run: 用 Step 4 里累计轮数的变化即可判断；再 `sleep 20; scselect | sed -n 's/^ \* .*(\(.*\))$/\1/p'; grep -c 'switched to' ~/.wifi-loc-control/agent.log`
+Expected: 位置仍是 `Home`；`switched to` 的累计行数**不再增长**。
 
 - [ ] **Step 6: 确认 kickstart 可用**
 
-Run: `launchctl kickstart -k gui/$(id -u)/com.yayadesu.auto-network-location; sleep 8; tail -3 ~/.wifi-loc-control/agent.log`
-Expected: 日志多出一条 `already in 'Home', nothing to do`，位置不变。
+Run: `launchctl kickstart gui/$(id -u)/com.yayadesu.auto-network-location; sleep 10; tail -3 ~/.wifi-loc-control/agent.log`
+Expected: 日志多出一条 `already in 'Home', nothing to do`，位置不变。注意 `kickstart -k` 会给正在运行的实例发 SIGTERM（`launchctl print` 里会留下 `last terminating signal = Terminated: 15`），所以只用不带 `-k` 的形式。
 
 - [ ] **Step 7: 确定日志是追加还是截断（V10）**
 
-Run: `a=$(wc -l < ~/.wifi-loc-control/agent.log); launchctl kickstart -k gui/$(id -u)/com.yayadesu.auto-network-location; sleep 8; b=$(wc -l < ~/.wifi-loc-control/agent.log); echo "$a -> $b"`
-Expected: `b > a`，确认**追加**。把这个结论记进 Task 6 的文档更新；若相反（截断），同样如实记录。
+Run: `a=$(wc -l < ~/.wifi-loc-control/agent.log); launchctl kickstart gui/$(id -u)/com.yayadesu.auto-network-location; sleep 10; b=$(wc -l < ~/.wifi-loc-control/agent.log); echo "$a -> $b"`
+Expected: `b > a`，确认**追加**（2026-09-16 实测如此：同样的那 5 行旧内容保留着）。把这个结论记进 Task 6 的文档更新；若相反（截断），同样如实记录。
 
 - [ ] **Step 8: 记下回滚方式**
 
@@ -663,7 +685,7 @@ assumed."
 
 - [ ] **Step 6: 最终核对**
 
-Run: `cd __REPO__ && git status --short --branch && git log --oneline -6 && bash -n wifi-loc-detect.sh && plutil -lint com.yayadesu.auto-network-location.plist`
+Run: `cd $(git rev-parse --show-toplevel) && git status --short --branch && git log --oneline -6 && bash -n wifi-loc-detect.sh && plutil -lint com.yayadesu.auto-network-location.plist`
 Expected: 工作区干净；`bash -n` 静默；plist `OK`。
 
 ---

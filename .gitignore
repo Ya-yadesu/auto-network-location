@@ -1,1 +1,6 @@
 .DS_Store
+
+# The real configuration holds this machine's network addresses (AGENTS.md
+# section 8). It belongs in ~/.wifi-loc-control/, and if a copy ever lands in
+# the checkout this keeps it out of reach of `git add .`.
+locations.env

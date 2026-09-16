@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  Two placeholders must be substituted before installing (see README):
+    __REPO__  absolute path to this checkout
+    __HOME__  your home directory
+  launchd expands neither ~ nor environment variables in these paths, so they
+  have to be literal by the time launchd reads this file.
+-->
+<dict>
+	<key>Label</key>
+	<string>com.yayadesu.auto-network-location</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>__REPO__/wifi-loc-detect.sh</string>
+		<string>--apply</string>
+		<string>--notify</string>
+	</array>
+
+	<!-- Run on every network change. There is deliberately no StartInterval:
+	     this is a one-shot script for a specific event, not a poller. If a
+	     WatchPaths event is ever missed the location stays wrong until the next
+	     network change, so the README documents the manual scselect commands. -->
+	<key>WatchPaths</key>
+	<array>
+		<string>/Library/Preferences/SystemConfiguration</string>
+	</array>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+
+	<!-- So osascript notifications land in the GUI session. -->
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+
+	<!-- A string, not an integer: launchd reads plist integers as decimal, so
+	     the leading zero is the only way to express octal 077 here. -->
+	<key>Umask</key>
+	<string>077</string>
+
+	<key>StandardOutPath</key>
+	<string>__HOME__/.wifi-loc-control/agent.log</string>
+	<key>StandardErrorPath</key>
+	<string>__HOME__/.wifi-loc-control/agent.log</string>
+</dict>
+</plist>

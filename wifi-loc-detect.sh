@@ -141,6 +141,18 @@ probe_device() {
 
 # Load the rules from the sourced config file into parallel arrays.
 # Returns 0 on success, non-zero when the file is missing or unusable.
+# 0-255 in each octet. A shape-only check accepts 999.1.1.1 and then spends the
+# whole probe budget on an address that cannot exist.
+valid_ipv4() {
+  local ip="$1" oct
+  [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+  local IFS=.
+  for oct in $ip; do
+    (( 10#$oct <= 255 )) || return 1   # 10# forces base 10, so "08" is eight
+  done
+  return 0
+}
+
 load_config() {
   [[ -f "$CONFIG" ]] || return 1
 
@@ -152,18 +164,23 @@ load_config() {
   LOC_NAMES=()
   LOC_IPS=()
   LOC_MACS=()
-  local n name ip mac
+  LOC_TARGET_IPS=()
+  LOC_TARGET_MACS=()
+  local n name ip mac tip tmac
   for (( n = 1; n <= 64; n++ )); do
     name="LOCATION_${n}_NAME"; ip="LOCATION_${n}_IP"; mac="LOCATION_${n}_MAC"
+    tip="LOCATION_${n}_TARGET_IP"; tmac="LOCATION_${n}_TARGET_MAC"
     name="${!name:-}"; ip="${!ip:-}"; mac="${!mac:-}"
-    unset "LOCATION_${n}_NAME" "LOCATION_${n}_IP" "LOCATION_${n}_MAC"
+    tip="${!tip:-}"; tmac="${!tmac:-}"
+    unset "LOCATION_${n}_NAME" "LOCATION_${n}_IP" "LOCATION_${n}_MAC" \
+          "LOCATION_${n}_TARGET_IP" "LOCATION_${n}_TARGET_MAC"
 
-    [[ -z "$name$ip$mac" ]] && continue
+    [[ -z "$name$ip$mac$tip$tmac" ]] && continue
     if [[ -z "$name" || -z "$ip" || -z "$mac" ]]; then
       log "config: LOCATION_$n is incomplete (need NAME, IP and MAC), skipping"
       continue
     fi
-    if [[ ! "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    if ! valid_ipv4 "$ip"; then
       log "config: LOCATION_$n has an invalid IP '$ip', skipping"
       continue
     fi
@@ -171,8 +188,30 @@ load_config() {
       log "config: LOCATION_$n has an invalid MAC '$mac', skipping"
       continue
     fi
-    # bash 3.2 + set -u errors on ${arr[*]} for an empty array, so guard it.
-    if [[ ${#LOC_NAMES[@]} -gt 0 && " ${LOC_NAMES[*]} " == *" $name "* ]]; then
+
+    # The target device answers a different question than the feature device:
+    # "is this still the network my settings were written for?" It defaults to
+    # the feature device, so a network that needs no separate check needs no
+    # separate configuration. See docs/2026-09-16-decision-model-design.md.
+    [[ -z "$tip" ]] && tip="$ip"
+    [[ -z "$tmac" ]] && tmac="$mac"
+    if ! valid_ipv4 "$tip"; then
+      log "config: LOCATION_$n has an invalid TARGET_IP '$tip', skipping"
+      continue
+    fi
+    if [[ ! "$tmac" =~ ^[0-9a-fA-F]{1,2}(:[0-9a-fA-F]{1,2}){5}$ ]]; then
+      log "config: LOCATION_$n has an invalid TARGET_MAC '$tmac', skipping"
+      continue
+    fi
+
+    # Compare name by name. Testing the joined list for a substring would
+    # wrongly drop "Home" when "Home Office" came first, and both are valid
+    # names (a location name may contain spaces).
+    local i dup=0
+    for (( i = 0; i < ${#LOC_NAMES[@]}; i++ )); do
+      [[ "${LOC_NAMES[$i]}" == "$name" ]] && { dup=1; break; }
+    done
+    if [[ "$dup" == 1 ]]; then
       log "config: duplicate location name '$name', skipping the later one"
       continue
     fi
@@ -180,6 +219,9 @@ load_config() {
     LOC_NAMES+=("$name")
     LOC_IPS+=("$ip")
     LOC_MACS+=("$mac")
+    LOC_TARGET_IPS+=("$tip")
+    LOC_TARGET_MACS+=("$tmac")
+    log "config: rule '$name': feature $ip, target $tip"
   done
 
   [[ ${#LOC_NAMES[@]} -gt 0 ]]

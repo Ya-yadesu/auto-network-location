@@ -97,6 +97,17 @@ check_eq  "manual away leaves state unset"    "" "$(cat "$WLC_STATE" 2>/dev/null
 runs away 5
 check_eq  "agent notifies after a manual run" 1 "$(count)"
 
+# A failed delivery must not be recorded as delivered, or the notice is lost.
+BADSTUB="$T/badbin"; mkdir -p "$BADSTUB"
+printf '#!/bin/sh\nexit 1\n' > "$BADSTUB/osascript"; chmod +x "$BADSTUB/osascript"
+: > "$WLC_NOTIFY_LOG"; rm -f "$WLC_STATE"
+WLC_CONFIG="$T/away.env" WLC_DEFAULT=Nowhere PATH="$BADSTUB:$PATH" \
+  ./wifi-loc-detect.sh --apply --notify > "$T/out.6" 2>&1
+check_eq  "failed delivery leaves state unset" "" "$(cat "$WLC_STATE" 2>/dev/null)"
+check_has "failed delivery is logged"          "$T/out.6" 'notification failed'
+runs away 7
+check_eq  "a later successful run notifies"    1 "$(count)"
+
 rm -rf "$T"
 echo "=== $pass passed, $fail failed ==="
 ```
@@ -114,7 +125,7 @@ Expected: FAIL。此时脚本还不认 `WLC_STATE`，状态文件从不生成，
 STATE="${WLC_STATE:-$HOME/.wifi-loc-control/state}"
 ```
 
-- [ ] **Step 4: 加读写函数**
+- [ ] **Step 4: 加读写函数，并让 `notify()` 报告投递失败**
 
 在 `notify()` 之前插入（注意注释是英文，符合约定 11）：
 
@@ -132,6 +143,26 @@ read_state() {
 
 write_state() {
   printf '%s\n' "$1" > "$STATE" 2>/dev/null || log "could not write state file: $STATE"
+}
+```
+
+然后把现有的 `notify()` 整体替换为下面这版——唯一的区别是投递失败时**返回非零**，而不再把失败吞掉：
+
+```bash
+# Print the notice to the log and, with --notify, deliver it. Returning
+# non-zero for a failed delivery lets the caller avoid recording a notice the
+# user never received, so the next trigger tries again.
+notify() {
+  local message="$1"
+  log "NOTIFY: $message"
+  if [[ "$NOTIFY" == 1 ]]; then
+    if ! osascript -e "display notification \"$message\" with title \"auto-network-location\"" \
+         >/dev/null 2>&1; then
+      log "notification failed"
+      return 1
+    fi
+  fi
+  return 0
 }
 ```
 
@@ -174,10 +205,12 @@ fi
 if [[ "$NOTIFY" == 1 && "$(read_state)" == "away" ]]; then
   log "away already reported, not notifying again"
 else
-  notify "$away_message"
-  # Remember it only when the user was actually told: a manual run without
-  # --notify must not swallow the notice the agent would send later.
-  [[ "$NOTIFY" == 1 ]] && write_state away
+  if notify "$away_message"; then
+    # Remember it only when the user was actually told: a manual run without
+    # --notify must not swallow the notice the agent would send later, and a
+    # failed delivery must be retried rather than recorded as delivered.
+    [[ "$NOTIFY" == 1 ]] && write_state away
+  fi
 fi
 exit 0
 ```
@@ -194,7 +227,7 @@ exit 0
 - [ ] **Step 8: 语法检查并重跑状态机验证**
 
 Run: `bash -n wifi-loc-detect.sh && bash /tmp/wlc-state-test.sh`
-Expected: `bash -n` 静默通过；状态机 **10 passed, 0 failed**。注意离家的三次运行每次约 7 秒（4 次重试），整个脚本约 35 秒。
+Expected: `bash -n` 静默通过；状态机 **11 passed, 0 failed**。注意离家的四次运行每次约 7 秒（4 次重试），整个脚本约 45 秒。
 
 - [ ] **Step 9: 回归——确认旧行为没被破坏**
 
@@ -235,9 +268,9 @@ to become idempotent. A state file records whether the user has already
 been told; only the literal value away counts, so a missing or unreadable
 file means one notice too many rather than one swallowed.
 
-The state moves to away only when the notification was actually sent, so a
-manual --apply run without --notify cannot suppress the agent's later
-notice."
+The state moves to away only when the notice was actually delivered, so
+neither a manual --apply run without --notify nor a failed osascript call
+can suppress the agent's later notice."
 ```
 
 ---

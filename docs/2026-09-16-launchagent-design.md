@@ -61,6 +61,7 @@
 
 - 路径 `~/.wifi-loc-control/state`，内容就是一行 `ok` 或 `away`。
 - **内容不是 `away` 时（缺失、空、未知值）一律按「没通知过」处理**——失败方向要偏向「多打扰一次」，而不是静默吞掉。
+- **只有通知真的送达才写 `away`**：`notify()` 失败时返回非零，状态不写，下一次触发会重试。理由同上——投递失败时重试的代价几乎是零（本来就不成功，不会真的弹窗打扰），而一旦 `osascript` 恢复正常，用户就能收到。
 - 可用环境变量 `WLC_STATE` 覆盖，供测试使用（与 `WLC_CONFIG`、`WLC_DEFAULT` 一致）。
 - **先通知、后写状态**：写失败只会导致下次重复通知；反过来会永久漏报，更糟。
 - 写状态失败只记一行日志，**不影响**判定与切换的退出码。
@@ -110,7 +111,7 @@ Label：`com.yayadesu.auto-network-location`
 | `locations.env` 缺失或全组非法 | 探测器退出 3。agent 每轮都在日志里记一行，不切换、不通知。不特殊处理，靠日志可见 |
 | 状态文件不可写 | 记一行日志，判定与切换照常，退出码不变 |
 | `scselect` 失败 | 探测器退出 1，日志记 `scselect ... failed` |
-| 通知发送失败 | 探测器记 `notification failed`；**但状态仍写 `away`**，所以这一条不会重试 |
+| 通知发送失败 | 探测器记 `notification failed`，**不**写 `away`，所以下一次触发会重试 |
 | 仓库被移动 | plist 里的绝对路径失效，job 每次启动即失败。必须重装（第 8 节） |
 
 ## 7. 已知弱点（记录，不修）
@@ -150,7 +151,7 @@ rm ~/Library/LaunchAgents/com.yayadesu.auto-network-location.plist
 | # | 项目 | 方法 | 期望 |
 |---|---|---|---|
 | V1 | 静态检查 | `plutil -lint`、`bash -n` | 通过 |
-| V2 | 状态机 | 用临时 `WLC_STATE` 跑「离家 → 再离家 → 回 ok → 再离家」 | 只有第 1、4 次通知；手动（无 `--notify`）跑不改状态 |
+| V2 | 状态机 | 用临时 `WLC_STATE` + 桩 `osascript` 跑「离家 → 再离家 → 回 ok → 手动离家 → 离家」，以及桩失败的一轮 | 只有第 1、5 次通知；手动（无 `--notify`）跑不改状态；投递失败不写状态、下一次会重试 |
 | V3 | 装载 | `bootstrap` 后 `launchctl print` | 出现在 gui/501 域，`RunAtLoad` 立刻产生一条日志 |
 | V4 | 进入方向端到端 | 在家时 `scselect Automatic`，不手动跑脚本 | 数秒内自动切回 `Home`；日志显示是 agent 触发的 |
 | V5 | 自触发收敛 | 数 V4 期间的运行轮数 | 只多跑一轮，或被 `ThrottleInterval` 抑制；**不出现连续多轮** |

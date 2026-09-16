@@ -77,6 +77,7 @@ docs/                                     设计与实施文档（中文）
 - **`scselect` 的改动会立即触发一轮**，这是「进入方向」得以自动化的原因，也是自触发的来源（见设计文档第 5 节）。
 - **触发延迟实测 ≈0–1 秒**（2026-09-16 16:15 与 16:16 两次真实切换）：用只读监视器每秒记 `/Library/Preferences/SystemConfiguration` 的 mtime 变化，再与 `agent.log` 每轮首行对齐——两次都是**同一秒**，`ThrottleInterval` 都没造成推迟。但它**只**在「上一轮刚跑过」时才推迟事件，所以这个尾风险**仍未量到**：这两次之前最近的一轮分别在约 22 分钟与约 83 秒之前，都不在 60 秒窗口内。**2026-09-16 晚已决定保持 60 不动**（依据与代价见设计文档 §11.4）——要动这个键先读那一节。
 - **受限沙箱里 `launchctl bootstrap` 必须提权**：不提权返回 `Bootstrap failed: 5: Input/output error`（**没有**沙箱标记），而且这个 `rc=5` 极易被 `2>/dev/null` 吞掉——2026-09-16 因此白等 88 秒，误以为 agent 已在跑。**装载后必须用 `launchctl print gui/$(id -u)/<label>` 校验**，不要相信「命令没报错」。
+- **`launchctl list` 在受限沙箱里静默失败**（2026-09-16 实测：`exit 1`、输出为空，连一行说明都没有），看起来完全像「这个 job 没登记」，极易被它带偏。判断有没有装载只认 `launchctl print gui/$(id -u)/<label>`（单点）或 `launchctl print gui/$(id -u)`（整域列表，每行是 `<PID> <上次退出状态> <label>`；`0 0 <label>` 就是「没在跑、上次退出 0」）。
 - **改 plist 后必须 `bootout` 再 `bootstrap`**，launchd 不会自动重读；仓库移动后 plist 里的绝对路径失效，必须重装。
 - **`launchctl` 的 `load`/`unload` 已被它自己标为待替代**，用 `bootstrap`/`bootout`。另外 `kickstart -k` 会给正在运行的实例发 SIGTERM（`print` 里留下 `last terminating signal = Terminated: 15`），调试用不带 `-k` 的形式。
 - **plist 里的 `Umask` 必须写成字符串**（如 `"077"`）：属性列表的整数按十进制解释，写成整数 `77` 会得到八进制 115。但它**管不到 launchd 替你创建的 `StandardOutPath`**——实测字符串写法下 `state` 是 `-rw-------` 而 `agent.log` 是 `-rw-r--r--`。日志要 600 只能在安装时预置（见 README）。

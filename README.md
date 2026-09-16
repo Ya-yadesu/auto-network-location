@@ -1,6 +1,6 @@
 # auto-network-location
 
-> English version: [README-EN.md](README-EN.md)
+> English version: [README.en.md](README.en.md)
 
 连上一个已知网络时，自动切换 macOS 的[网络位置](https://support.apple.com/en-us/105129)，
 让那个网络需要的设置（静态 IPv4、网关、DNS、IPv6 状态）自动生效，不用手动改。

@@ -10,6 +10,8 @@
 
 **Spec:** `docs/2026-09-16-decision-model-design.md`
 
+**本计划的来源**：设计文档 + 2026-09-16 的一轮 code review。review 里经复核成立的项目已折进对应任务——重名子串误杀（P1）与 IP 段值越界（P3）进了 Task 1，状态写入非原子（P4）进了 Task 2，脚本自述/`--help` 硬编码行号、README 与代码相反的那句、文档状态标注、以及线上日志的证据表进了 Task 3。review 里归因不成立的两项（任务 3 会改 header、Home 上两次误报）没有采纳，理由见当次对话。
+
 ## Global Constraints
 
 - **纯 bash 3.2**：不得用 `${var,,}`、`mapfile`、关联数组。大小写归一化用 `tr`。
@@ -98,6 +100,30 @@ run "$T/bad.env" "$T/o4"
 has   "非法 TARGET_IP 报错并跳过整组" "$T/o4" "invalid TARGET_IP"
 hasnt "非法组没有进入规则表"          "$T/o4" "config: rule"
 
+# 5. 重名判断必须逐元素比较（P1：旧代码用子串匹配，会把 "Home" 误判成
+#    与 "Home Office" 重名）
+cat > "$T/names.env" <<'EOF'
+LOCATION_1_NAME="Home Office"
+LOCATION_1_IP="192.0.2.1"
+LOCATION_1_MAC="00:00:5e:00:53:01"
+LOCATION_2_NAME="Home"
+LOCATION_2_IP="192.0.2.2"
+LOCATION_2_MAC="00:00:5e:00:53:02"
+EOF
+run "$T/names.env" "$T/o5"
+hasnt "子串名字不算重名（P1）" "$T/o5" "duplicate"
+has   "两条规则都加载"         "$T/o5" "loaded 2 location rule(s)"
+
+# 6. 段值越界必须被跳过（P3：旧代码只查形状，999.1.1.1 会被接受并被探测）
+cat > "$T/range.env" <<'EOF'
+LOCATION_1_NAME="Home"
+LOCATION_1_IP="999.1.1.1"
+LOCATION_1_MAC="00:00:5e:00:53:01"
+EOF
+run "$T/range.env" "$T/o6"
+has   "越界 IP 被跳过（P3）" "$T/o6" "invalid IP"
+hasnt "越界组未加载"         "$T/o6" "config: rule"
+
 rm -rf "$T"
 echo "=== $pass passed, $fail failed ==="
 ```
@@ -112,6 +138,18 @@ Expected: FAIL——此时不认 `_TARGET_*`，`o1` 里没有 `config: rule` 行
 把 `wifi-loc-detect.sh` 里的 `load_config()` 整体替换为：
 
 ```bash
+# 0-255 in each octet. A shape-only check accepts 999.1.1.1 and then spends the
+# whole probe budget on an address that cannot exist.
+valid_ipv4() {
+  local ip="$1" oct
+  [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+  local IFS=.
+  for oct in $ip; do
+    (( 10#$oct <= 255 )) || return 1   # 10# forces base 10, so "08" is eight
+  done
+  return 0
+}
+
 load_config() {
   [[ -f "$CONFIG" ]] || return 1
 
@@ -139,7 +177,7 @@ load_config() {
       log "config: LOCATION_$n is incomplete (need NAME, IP and MAC), skipping"
       continue
     fi
-    if [[ ! "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    if ! valid_ipv4 "$ip"; then
       log "config: LOCATION_$n has an invalid IP '$ip', skipping"
       continue
     fi
@@ -154,7 +192,7 @@ load_config() {
     # separate configuration. See docs/2026-09-16-decision-model-design.md.
     [[ -z "$tip" ]] && tip="$ip"
     [[ -z "$tmac" ]] && tmac="$mac"
-    if [[ ! "$tip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    if ! valid_ipv4 "$tip"; then
       log "config: LOCATION_$n has an invalid TARGET_IP '$tip', skipping"
       continue
     fi
@@ -163,8 +201,14 @@ load_config() {
       continue
     fi
 
-    # bash 3.2 + set -u errors on ${arr[*]} for an empty array, so guard it.
-    if [[ ${#LOC_NAMES[@]} -gt 0 && " ${LOC_NAMES[*]} " == *" $name "* ]]; then
+    # Compare name by name. Testing the joined list for a substring would
+    # wrongly drop "Home" when "Home Office" came first, and both are valid
+    # names (a location name may contain spaces).
+    local i dup=0
+    for (( i = 0; i < ${#LOC_NAMES[@]}; i++ )); do
+      [[ "${LOC_NAMES[$i]}" == "$name" ]] && { dup=1; break; }
+    done
+    if [[ "$dup" == 1 ]]; then
       log "config: duplicate location name '$name', skipping the later one"
       continue
     fi
@@ -186,7 +230,7 @@ load_config() {
 - [ ] **Step 4: 运行，确认通过**
 
 Run: `bash -n wifi-loc-detect.sh && bash /tmp/wlc-target-config.sh`
-Expected: `bash -n` 静默；**6 passed, 0 failed**。
+Expected: `bash -n` 静默；**10 passed, 0 failed**（含 P1 子串重名与 P3 段值越界两个回归）。
 
 - [ ] **Step 5: 回归——旧判定不受影响**
 
@@ -383,9 +427,15 @@ read_miss() {
 }
 
 # write_state <state> <miss>
+# Written through a temporary file in the same directory: a reader must never
+# see a half-written state, because two triggers can overlap.
 write_state() {
-  printf 'state=%s\nmiss=%s\n' "$1" "$2" > "$STATE" 2>/dev/null \
-    || log "could not write state file: $STATE"
+  local tmp="${STATE}.tmp.$$"
+  if printf 'state=%s\nmiss=%s\n' "$1" "$2" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$STATE" 2>/dev/null || { rm -f "$tmp"; log "could not write state file: $STATE"; }
+  else
+    log "could not write state file: $STATE"
+  fi
 }
 ```
 
@@ -663,26 +713,93 @@ switching away would silently replace your static settings with DHCP.
 > 触发层的机械部分（`WatchPaths` + `StartInterval` + 幂等收敛）仍然有效。
 ```
 
-- [ ] **Step 7: 文档自检 + 提交**
+- [ ] **Step 7: 重写脚本自述，并把 `--help` 的行号改成哨兵**
+
+脚本现在按新模型跑，但 header 第 16–20 行、Usage 注释和 `--help` 正文仍在说「只通知、不切」。三者都要改，否则 `--help` 会自相矛盾（这是 code review 抓到的计划缺口）。
+
+先改 header 里那段设计说明，写成「两个方向、只有离开回落、两台设备的角色」。再把 Usage 块改成：
+
+```bash
+#   ./wifi-loc-detect.sh                    # dry run: print the decision only
+#   ./wifi-loc-detect.sh --apply            # actually run scselect
+#   ./wifi-loc-detect.sh --apply --notify   # notify when this network no
+#                                           # longer matches the settings
+#   ./wifi-loc-detect.sh --print-mac <ip>   # helper: show the MAC for an IP,
+#                                           # to fill in the config file
+```
+
+然后删掉 `HELP_LAST_LINE=41` 这一行，并把 `--help` 分支换成哨兵（对行数免疫，改 header 不会再静默截断）：
+
+```bash
+    -h|--help)
+      awk 'NR > 1 && /^set -uo pipefail/ { exit }
+           NR > 1 { sub(/^# ?/, ""); print }' "$0"
+      exit 0 ;;
+```
+
+Run: `bash -n wifi-loc-detect.sh; ./wifi-loc-detect.sh --help | grep -c 'print-mac'; ./wifi-loc-detect.sh --help | tail -4`
+Expected: 语法通过；`grep -c` 是 `1`（旧版曾被截断成 `0`）；`tail` 显示完整的 Usage 尾部。
+
+再验证哨兵对行数免疫：在 header 里临时插入一行注释，`--help` 仍应打印完整块，然后撤销那一行。
+
+- [ ] **Step 8: 修 README 那处与代码相反的陈述与退出码**
+
+- §2「Write the config」里那句 `When no group matches, the script switches to the default location, which is Automatic` 换成新模型的准确表述：**没命中任何已知网络时**，若当前不在默认位置就回落到它（需连续两轮确认），否则什么都不做。这句在旧代码下是错的、在新模型下才成立，所以必须随行为一起改，不能只删。
+- `Exit codes` 那行补上 `1`（`scselect` 失败，或 `--print-mac` 无应答）。
+
+Run: `grep -n 'switches to the default location' README.md || echo "PASS: 旧表述已清除"`
+Expected: `PASS`。
+
+- [ ] **Step 9: 给「谁是当前事实」加状态标注**
+
+仓库里同时存在「旧模型代码 + 新设计文档 + 两份计划」，后来者容易照错的一份改。加三行状态：
+
+- `docs/2026-09-16-launchagent-design.md` 第 4 行的「状态：设计已确认，待实现」→「状态：**已实施并实测**（触发层在跑，见 `AGENTS.md` 第 6 节）」。
+- `docs/2026-09-16-launchagent-plan.md` 顶部加：「**状态：已执行**（6 个任务全部完成并验证）。」
+- 本文件顶部加：「**状态：已批准，执行中**。」
+
+- [ ] **Step 10: AGENTS.md 第 6 节的「尚未验证」换成证据**
+
+把那份清单写成实测记录（时间戳取自 `~/.wifi-loc-control/agent.log`，共 5 次 `no answer`）：
+
+```markdown
+| 时间 | 当时位置 | 归因 |
+|---|---|---|
+| 10:49:38 | `Automatic` | **待查**——使用者确认当时在家庭网络上，未复现 |
+| 10:58:21 | `Home` | 使用者手动切到手机热点（10:58:07 与 10:59:03 设备均在场）|
+| 11:08:26 | `Home` | 刻意的热点测试第一轮（通知一次）|
+| 11:09:27 | `Home` | 同一测试第二轮（被去重抑制）|
+| 11:56:52 | `Home` | 使用者手动切到手机热点（其下一条消息即在问热点下为何不切）|
+```
+
+并注明：**连续两轮只出现过一次，且那一次是真离开**，所以 `miss >= 2` 的阀值目前没有反例。若将来观察到「在家里连续两轮未确认」，阀值应提到 3——把这条判断依据留在文档里。
+
+- [ ] **Step 11: 文档自检 + 提交**
 
 Run:
 
 ```sh
-git grep -nE '只通知、不自动切|只通知，不自动切|no LaunchAgent yet' -- . || echo "PASS: 旧表述已清除"
+git grep -nE '只通知、不自动切|只通知，不自动切|no LaunchAgent yet|HELP_LAST_LINE' -- . || echo "PASS: 旧表述与硬编码行号已清除"
 git grep -c '_TARGET_IP' -- . | sed 's/^/  /'
 bash -n wifi-loc-detect.sh
+./wifi-loc-detect.sh --help | grep -c 'print-mac'
 bash /tmp/wlc-decision-test.sh | tail -1
 ```
 
-Expected: 旧表述 0 命中；字段名出现在 example/README/AGENTS/设计文档；判定用例仍全过。
+Expected: 旧表述 0 命中；字段名出现在 example/README/AGENTS/设计文档；语法通过；`--help` 里有 `print-mac`；判定用例全过。
 
 ```bash
-git add locations.env.example README.md AGENTS.md docs/
+git add locations.env.example README.md AGENTS.md wifi-loc-detect.sh docs/
 git commit -m "docs: describe the two device roles and the fallback
 
 Replaces the notify-only rule in the conventions, the README decision
-table and the state recipe with what the detector now does: fall back when
-the feature device is gone, notify when the target device is gone."
+table, the script's own header and its --help output with what the
+detector now does: fall back when the feature device is gone, notify when
+the target device is gone.
+
+--help no longer depends on a hardcoded last line, so editing the header
+can no longer silently truncate it, and the two docs that describe the
+current state now say which state they describe."
 ```
 
 ---

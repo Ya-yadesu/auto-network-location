@@ -108,6 +108,11 @@ mkdir -p ~/.wifi-loc-control
 `~/.wifi-loc-control/locations.env` — **one numbered group per network**:
 
 ```sh
+# Language: changes the --help text and the notification bodies only; log lines
+# and the state file stay in English. "zh_CN" (default) or "en"; the
+# environment variable WLC_LANG overrides it.
+SCRIPT_LANG="zh_CN"
+
 # the macOS location to switch to, the device address, and the device MAC
 LOCATION_1_NAME="Home"
 LOCATION_1_IP="192.0.2.1"
@@ -124,6 +129,15 @@ LOCATION_1_MAC="00:00:5e:00:53:01"
 # LOCATION_2_IP="198.51.100.1"
 # LOCATION_2_MAC="aa:bb:cc:dd:ee:ff"
 ```
+
+`SCRIPT_LANG` is a **global** field — it is not part of a numbered group. It sets
+the language of the `--help` text and of the **notification bodies**; the default
+is Simplified Chinese (`zh_CN`), and `"en"` selects English (the environment
+variable `WLC_LANG` overrides it for one run). Only those two values are
+accepted, case-insensitively; anything else — `zh-CN`, for instance — falls back
+to `zh_CN` with one line in the log, because a mistyped language must never stop
+a run from deciding and switching. **Log lines and the state file stay in
+English**: they are meant to be grepped, and the state values carry meaning.
 
 Add a network by copying a group and incrementing the number. The location name
 is a *value* rather than a variable name, so it may contain spaces and non-ASCII

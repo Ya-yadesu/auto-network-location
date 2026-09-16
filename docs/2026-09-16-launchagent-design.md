@@ -27,7 +27,7 @@
 | `wifi-loc-detect.sh` | 改动 | 增加「通知去重」：状态文件 + 只在离家状态**刚出现**时通知 |
 | `com.yayadesu.auto-network-location.plist` | 新增 | LaunchAgent 定义，装到 `~/Library/LaunchAgents/` |
 | `~/.wifi-loc-control/state` | 运行时生成 | 记录用户当前是否已被告知离家（600） |
-| `~/.wifi-loc-control/agent.log` | 运行时生成 | LaunchAgent 的 stdout/stderr（600） |
+| `~/.wifi-loc-control/agent.log` | 运行时生成 | LaunchAgent 的 stdout/stderr（**launchd 建成 644**，见第 4 节实测） |
 
 探测器仍然是唯一的代码文件，agent 不引入任何包装脚本——触发层保持「哑」的，所有判断都留在探测器里。
 
@@ -89,9 +89,11 @@ Label：`com.yayadesu.auto-network-location`
 
 `man launchd.plist`：值是整数时按**十进制**解释，属性列表无法写八进制；要写八进制必须用**字符串**并加前导 `0`。
 
-所以 `Umask` 必须写字符串 `"077"`。若写成整数 `77`，实际生效的是十进制 77 = 八进制 115 —— 文件权限会变成一组你没预期的值。这条要写进 `AGENTS.md`（同类陷阱的记法）。
+所以 `Umask` 必须写字符串 `"077"`。若写成整数 `77`，实际生效的是十进制 77 = 八进制 115 —— 文件权限会变成一组你没预期的值。
 
-`Umask` 作用于整个 job，因此 `agent.log` 与 `state` 都会是 600。
+**但 `Umask` 管不到 launchd 替你创建的日志文件。** 2026-09-16 实测：`Umask` 写的是字符串 `"077"`、`launchctl print` 也显示 `umask = 77`、脚本自己写的 `state` 是 `-rw-------`，而 `agent.log` 是 **`-rw-r--r--`**。结论：`Umask` 只约束 job 进程自己创建的文件，`StandardOutPath` / `StandardErrorPath` 由 launchd 创建，权限不受它影响。
+
+因此安装时预置一次：先 `touch` 日志文件、`chmod 600`，再 `bootstrap`——launchd 打开已存在的文件时不会改其权限。实际暴露本来就是零（家目录是 `drwxr-x---+`，别的本地用户进不来），预置是为了严格符合第 8 节的隐私约定。
 
 ## 5. 自触发分析
 
@@ -122,6 +124,7 @@ Label：`com.yayadesu.auto-network-location`
 
   也就是说兜底**不覆盖睡眠**：睡眠期间错过的间隔是直接跳过，不是延后补发。它能保证的只是「唤醒后最多 5 分钟内会跑一次」。而「开盖那一刻就切」取决于 `WatchPaths` 会不会在重新关联 Wi-Fi 时触发——**必须实测，不能推理**。若实测证明唤醒不触发且 5 分钟静默期不可接受，退回「常驻轮询进程」方案（`KeepAlive` + 自己 sleep，唤醒后循环自然继续）。
 
+- **一次未解释的 8 秒探测失败（2026-09-16，待查）。** 10:49:38 那次由 `scselect` 触发的运行里，探测器对特征设备连续重试约 8 秒全是 `no answer`，位置因此停在 `Automatic`；39 秒后再探立刻命中。使用者已确认**当时连着的是家里的网络**（不是热点），所以这条不能用「换网」解释，也尚未复现：实测接口在切换后约 **3 秒**就拿到 DHCP 地址并解析出邻居条目，另有两次无人干预的运行分别在 1 秒和 3 秒内命中。**如果它会复发**，症状是「该切的时候没切，最多等一个 `StartInterval`」。复发时按第 9 节 V4 的重复实验取证，不要凭推理改探测逻辑。
 - **`agent.log` 无界增长。** 每次运行 4–8 行；若每天数百次触发就是每年几十 MB 量级。删除是安全的（`state` 是独立文件，删掉只会让下次离家重新通知一次）。暂不做轮转。
 - **`RunAtLoad` 与 `StartInterval` 都可能在一次登录里产生一次多余运行**，可接受。
 
@@ -153,12 +156,12 @@ rm ~/Library/LaunchAgents/com.yayadesu.auto-network-location.plist
 | V1 | 静态检查 | `plutil -lint`、`bash -n` | 通过 |
 | V2 | 状态机 | 用临时 `WLC_STATE` + 桩 `osascript` 跑「离家 → 再离家 → 回 ok → 手动离家 → 离家」，以及桩失败的一轮 | 只有第 1、5 次通知；手动（无 `--notify`）跑不改状态；投递失败不写状态、下一次会重试 |
 | V3 | 装载 | `bootstrap` 后 `launchctl print` | 出现在 gui/501 域，`RunAtLoad` 立刻产生一条日志 |
-| V4 | 进入方向端到端 | 在家时 `scselect Automatic`，不手动跑脚本 | 数秒内自动切回 `Home`；日志显示是 agent 触发的 |
+| V4 | 进入方向端到端 | 先确认设备在场，再 `scselect Automatic`，然后**只观察**最多 45 秒；重复 3 轮 | 每轮数秒内自动切回 `Home`，日志显示是 agent 触发的。**若期间有人手动改 Wi-Fi 网络或关掉 Wi-Fi，本轮作废**——2026-09-16 曾因为忽视这一点，把一次正确的判断误读成缺陷 |
 | V5 | 自触发收敛 | 数 V4 期间的运行轮数 | 只多跑一轮，或被 `ThrottleInterval` 抑制；**不出现连续多轮** |
 | V6 | 手动触发 | `launchctl kickstart -k gui/$(id -u)/<label>` | 产生一轮运行 |
 | V7 | 离家去重 | 连手机热点，等触发，再手动 `kickstart` | 通知**只弹一次**；第二次日志里出现「已报告过」那一行 |
 | V8 | 唤醒 | 真实睡眠一次，唤醒后观察 | 记录唤醒后多久跑了一轮（本设计的核心未知数） |
-| V9 | 权限 | `stat` 两个运行时文件 | `state` 600、`agent.log` 600（同时验证 `Umask` 字符串写法） |
+| V9 | 权限 | `stat` 两个运行时文件 | `state` 600；`agent.log` **默认 644**（launchd 创建，`Umask` 管不到），按第 4 节预置后应为 600 |
 | V10 | 日志行为 | 多次运行后看行数 | 确认 launchd 是追加而非截断，并据实写入文档 |
 
 V8 需要一次短暂睡眠；V7 需要再连一次热点。两者都要先告知使用者。

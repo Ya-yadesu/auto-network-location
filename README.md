@@ -150,10 +150,15 @@ A LaunchAgent can apply the decision whenever the network changes, so you do
 not have to run the script yourself:
 
 ```sh
+touch ~/.wifi-loc-control/agent.log && chmod 600 ~/.wifi-loc-control/agent.log
 cp com.yayadesu.auto-network-location.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.yayadesu.auto-network-location.plist
 launchctl print gui/$(id -u)/com.yayadesu.auto-network-location
 ```
+
+The first line pre-creates the log with mode 600. launchd creates the
+`StandardOutPath` file itself and the plist's `Umask` key does not apply to it,
+so a pre-existing file is the only way to keep the log private.
 
 To remove it again:
 

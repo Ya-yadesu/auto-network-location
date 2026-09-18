@@ -553,6 +553,7 @@ suite_decision() {
   # N7 —— 第一趟全程沉默（8 次查询 = 4 遍），在复探那一趟应答：回落、切回，全程安静
   reset; run "$OK_CFG" Automatic Home 8
   has "N7 复探命中并切回"  "$T/out" "the device is back after all"
+  hasnt "N7 切回后不再打印 already in" "$T/out" "already in 'Home'"
   eq  "N7 回落了一次"      1 "$(ss_count Automatic)"
   eq  "N7 也切回了一次"    1 "$(ss_count Home)"
   eq  "N7 全程不通知"      0 "$(notify_count)"
@@ -645,6 +646,7 @@ EOF
   OK_T="$T/okt.env"; mkcfg "$OK_T" "$FIP" "$FMAC" "$F2IP" "$F2MAC"
   reset; run "$OK_T"
   has   "N9 复探命中，静默切回"        "$T/out" "the device is back after all"
+  hasnt "N9 切回后不再打印 already in"  "$T/out" "already in 'Home'"
   order "N9 先切回原位置，再核对目标"  "switched back to 'Home'" "$T/out" "target device, expect"
   has   "N9 独立目标设备被判在场"      "$T/out" "target present"
   eq    "N9 状态 ok"                   ok "$(st)"

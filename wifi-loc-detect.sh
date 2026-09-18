@@ -535,9 +535,12 @@ switch_back() {
   fi
   log "switched back to '$matched_location'"
   current="$matched_location"
+  # 记下「这一轮是我们自己切回来的」，供下面决定还要不要打印 already in。
+  switched_back=1
 }
 
 fell_back=0
+switched_back=0
 sweep=1
 while [[ $sweep -le $ATTEMPTS ]]; do
   if probe_sweep; then
@@ -630,7 +633,10 @@ if [[ "$matched_location" != "$current" ]]; then
     log "dry run: would switch to '$matched_location' (use --apply)"
     exit 0
   fi
-else
+elif [[ "$switched_back" != 1 ]]; then
+  # 只在「本来就在这个位置」时打印。这一轮刚由 switch_back 切回来的那种情况留空：它已经
+  # 打印过 switched back …，紧跟一句 already in … 读起来像自相矛盾——线上日志里 16 次切回
+  # 每一次都跟着这样一对——而判定结果已经由那两行说清楚了；下面照样继续核对目标设备。
   log "already in '$matched_location', nothing to do"
 fi
 

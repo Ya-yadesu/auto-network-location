@@ -83,6 +83,13 @@ are separate operations.
 - bash 3.2 (the system bash) — the script avoids bash 4+ features on purpose
 - no third-party dependencies
 
+Privileges come in two layers: **running needs none** (the `scselect` switch is measured to
+work without elevation), while **changing network settings during setup needs at least admin
+privileges** — `man networksetup` says *"requires at least admin privileges to change network
+settings"*. So the "Create the locations" step below is either done by hand in System
+Settings or with one `sudo networksetup`. Loading the agent, on the other hand, **needs no
+reboot**: `launchctl bootstrap` plus `RunAtLoad` in the plist runs one round immediately.
+
 ## Setup
 
 ### 1. Create the locations
@@ -91,6 +98,22 @@ Create one location per network, with the settings that network needs:
 
 - `Automatic` — the roaming default: DHCP, automatic DNS.
 - e.g. `Home` — the static settings for that network.
+
+**Back up first.** This is the only irreversible step in the whole setup:
+`-createlocation … populate` wipes the current location's services, and a lost static
+configuration does not come back on its own. The backup **needs no elevation** (the file is
+`-rw-r--r--`); only restoring does:
+
+```sh
+cp /Library/Preferences/SystemConfiguration/preferences.plist \
+   ~/.wifi-loc-control/preferences.plist.bak-$(date +%Y%m%d-%H%M%S)
+```
+
+It goes into `~/.wifi-loc-control/` on purpose: that directory is **not** watched by the job,
+so writing there cannot trigger a run. If it does go wrong, copy the file back
+(`sudo cp … /Library/Preferences/SystemConfiguration/preferences.plist`) and reboot — the only
+reboot this method ever needs. If the network is already too broken for that, do the same
+thing from a terminal in Recovery mode.
 
 `networksetup` creates an **empty** location with `-createlocation <name>`
 (no services), and `-createlocation <name> populate` creates fresh default
@@ -218,6 +241,9 @@ Run that from the root of this checkout: the plist ships with two placeholders
 launchd expands neither `~` nor environment variables, so those paths must be
 literal by the time launchd reads the file.
 
+No reboot is needed afterwards: `bootstrap` plus `RunAtLoad` in the plist runs one round
+immediately (measured: the switch completes within a second).
+
 The first line pre-creates the log with mode 600. launchd creates the
 `StandardOutPath` file itself and the plist's `Umask` key does not apply to it,
 so a pre-existing file is the only way to keep the log private.
@@ -263,6 +289,65 @@ scselect Home                   # switch to a location
 
 Because the job only runs on a network change, a wrong guess stays until the next
 one unless you run that by hand.
+
+## Moving to a new Mac
+
+Work through this in order when coming over from an old machine. Every step carries an
+acceptance check — **"what you did" and "whether you did it right" are two different
+things**, and only a run tells you the second one.
+
+**0. Pick a directory you will not move later** for this checkout. The plist holds an
+absolute path, so moving the repo means reinstalling.
+
+**1. Create the locations** (this step needs admin privileges)
+
+Do what "Setup → 1. Create the locations" says, including the backup described there. The
+location name must match `LOCATION_n_NAME` in your config exactly. Check:
+`networksetup -listlocations` lists it, and after switching to it `networksetup -getinfo Wi-Fi`
+shows the IPv4 and DNS you wrote (if the service is not called `Wi-Fi`, find it with
+`networksetup -listallnetworkservices` first).
+
+**2. Move the config**
+
+```sh
+mkdir -p ~/.wifi-loc-control
+cp <old machine>/.wifi-loc-control/locations.env ~/.wifi-loc-control/
+chmod 600 ~/.wifi-loc-control/locations.env
+```
+
+Same networks, so the values are unchanged. **If the characteristic device's address or MAC
+changed**, collect it again from that network: `./wifi-loc-detect.sh --print-mac <address>`.
+Check: `stat -f '%Sp' ~/.wifi-loc-control/locations.env` says `600`.
+
+**3. Dry run**
+
+```sh
+./wifi-loc-detect.sh
+```
+
+Read-only; it changes nothing. Check: the output names `current location: '<name>'` and the
+characteristic device is found (no `no answer`).
+
+**4. Install the agent**
+
+Run the three commands under "Running automatically" above. Check:
+`launchctl print gui/$(id -u)/com.yayadesu.auto-network-location` prints the job — do not
+trust the command merely not failing, since a failed `bootstrap` reports an exit code that is
+easy to swallow; and `stat -f '%Sp' ~/.wifi-loc-control/agent.log` says `600`.
+
+**5. Confirm end to end** (no need to actually change networks)
+
+```sh
+scselect Automatic        # pretend you left
+sleep 20
+tail -5 ~/.wifi-loc-control/agent.log
+cat ~/.wifi-loc-control/state
+```
+
+Check: the log shows `switched to '<name>'` — it recognised the network and put the location
+back, so both the trigger layer and the decision layer work; and `state` is `state=ok`. This
+really does switch locations twice, and each switch briefly interrupts the network (see
+"Known limitations" below).
 
 ## Known limitations
 

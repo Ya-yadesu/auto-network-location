@@ -68,6 +68,12 @@ IPv4/DNS 只有「按网络服务」的概念，从来没有「按 SSID」，所
 - bash 3.2（系统自带）——脚本刻意回避 bash 4+ 的语法
 - 无第三方依赖
 
+权限分两层：**运行时不需要任何提权**（切换位置用的 `scselect` 已实测免提权），而**安装时改网络
+设置至少需要管理员权限**——`man networksetup` 原文是 *"requires at least admin privileges to
+change network settings"*。所以下面「建位置」那一步，要么你在 System Settings 里手动做，要么
+用 `sudo` 跑一次 `networksetup`。另外：**装载 agent 不需要重启 Mac**，`launchctl bootstrap`
+加上 plist 里的 `RunAtLoad` 会立刻跑一轮。
+
 ## 安装
 
 ### 1. 建位置
@@ -76,6 +82,19 @@ IPv4/DNS 只有「按网络服务」的概念，从来没有「按 SSID」，所
 
 - `Automatic` —— 漫游用的默认位置：DHCP、自动 DNS。
 - 例如 `Home` —— 那张网络的静态设置。
+
+**动手之前先备份。** 这里是整套安装里唯一不可逆的地方：`-createlocation … populate` 会清掉
+当前位置的服务，而静态设置丢了不会自己回来。备份**不需要**提权（那个文件是 `-rw-r--r--`），
+只有恢复才需要：
+
+```sh
+cp /Library/Preferences/SystemConfiguration/preferences.plist \
+   ~/.wifi-loc-control/preferences.plist.bak-$(date +%Y%m%d-%H%M%S)
+```
+
+放在 `~/.wifi-loc-control/` 里是有意的：那个目录**不被** job 监视，不会自己触发一轮。真出事时
+把它拷回去（`sudo cp … /Library/Preferences/SystemConfiguration/preferences.plist`）再重启——
+这是本方法里唯一需要重启的场景；网络已经坏到不可用时，在恢复模式的终端里做同样的事。
 
 `networksetup -createlocation <名>` 建出来的是**空位置**（没有服务）；而
 `-createlocation <名> populate` 建的是全新默认服务，并且**不**复制当前位置的
@@ -183,6 +202,9 @@ launchctl print gui/$(id -u)/com.yayadesu.auto-network-location
 是你的家目录），因为 launchd 既不展开 `~` 也不展开环境变量，所以它读这个文件时，
 那些路径必须已经是字面值。
 
+装完**不需要重启**：`bootstrap` 加上 plist 里的 `RunAtLoad` 会立刻跑一轮（实测一秒内完成
+切换）。
+
 第一行预先把日志建出来、权限设成 600。`StandardOutPath` 那个文件是 launchd 自己建的，
 plist 里的 `Umask` 对它不起作用，所以「预置一个已存在的文件」是让日志保持私密的
 唯一办法。
@@ -220,6 +242,59 @@ scselect Home                   # 切到某个位置
 ```
 
 因为这个 job 只在网络变化时跑，猜错的位置会一直留着，除非你手动执行上面那条命令。
+
+## 迁移到新 Mac（照做清单）
+
+从旧机器搬过来时按这个顺序做。每一步都带验收命令——**「做了什么」和「做对了没有」是两件事**，
+后者只能靠跑一次看出来。
+
+**0. 选一个以后不搬的目录**放本仓库。plist 里存的是绝对路径，仓库搬家就得重装。
+
+**1. 建位置**（这一步需要管理员权限）
+
+按上面「安装 → 1. 建位置」做，并先做那里说的备份。位置名要与配置里的 `LOCATION_n_NAME`
+完全一致。验收：`networksetup -listlocations` 里有它；切过去之后 `networksetup -getinfo Wi-Fi`
+显示的 IPv4 与 DNS 跟你写的一致（服务名不叫 `Wi-Fi` 就先 `networksetup -listallnetworkservices`
+查一下）。
+
+**2. 搬配置**
+
+```sh
+mkdir -p ~/.wifi-loc-control
+cp <旧机器>/.wifi-loc-control/locations.env ~/.wifi-loc-control/
+chmod 600 ~/.wifi-loc-control/locations.env
+```
+
+同一批网络，值不用改。**只要那台特征设备的地址或 MAC 变了**，就必须在**那张网上**重新采一次：
+`./wifi-loc-detect.sh --print-mac <地址>`。验收：`stat -f '%Sp' ~/.wifi-loc-control/locations.env`
+是 `600`。
+
+**3. 干跑**
+
+```sh
+./wifi-loc-detect.sh
+```
+
+只读，什么都不改。验收：输出里有 `current location: '<位置名>'`，并且特征设备被认了出来
+（没有 `no answer`）。
+
+**4. 装 agent**
+
+按上面「自动运行」的三条命令。验收：`launchctl print gui/$(id -u)/com.yayadesu.auto-network-location`
+能打印出这个 job——不要只看命令有没有报错，`bootstrap` 失败时那个退出码很容易被吞掉；
+`stat -f '%Sp' ~/.wifi-loc-control/agent.log` 是 `600`。
+
+**5. 端到端确认**（不必真的换网）
+
+```sh
+scselect Automatic        # 假装离开
+sleep 20
+tail -5 ~/.wifi-loc-control/agent.log
+cat ~/.wifi-loc-control/state
+```
+
+验收：日志里出现 `switched to '<位置名>'`，说明它自己把位置认了回来——触发层与判定层就都通了；
+`state` 是 `state=ok`。注意这一步会真的切两次位置，每次都会短暂断网（见下节「已知限制」）。
 
 ## 已知限制
 
